@@ -6,7 +6,11 @@ import os
 import sqlite3
 
 app = Flask(__name__)
-app.secret_key = 'business_plan_escolar_secret_key_2024'
+
+# Configuração para produção
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'business_plan_escolar_prod_2024_seguro')
+app.config['TEMPLATES_AUTO_RELOAD'] = os.environ.get('FLASK_ENV') == 'development'
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 31536000  # Cache de 1 ano
 
 # Configuração do banco de dados
 basedir = os.path.abspath(os.path.dirname(__file__))
@@ -17,7 +21,7 @@ def init_db():
     try:
         # Garante que a pasta data existe
         if not os.path.exists(os.path.join(basedir, 'data')):
-            os.makedirs(os.path.join(basedir, 'data'))
+            os.makedirs(os.path.join(basedir, 'data'), exist_ok=True)
         
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
@@ -185,6 +189,16 @@ def calcular_projecao(dados):
         'custo_marketing': custo_marketing
     }
 
+# Middleware para segurança básica
+@app.before_request
+def before_request():
+    """Middleware para configurações de segurança"""
+    # Forçar HTTPS em produção (se configurado)
+    if os.environ.get('FLASK_ENV') == 'production':
+        if request.url.startswith('http://'):
+            url = request.url.replace('http://', 'https://', 1)
+            return redirect(url, code=301)
+
 # Rotas da aplicação
 @app.route('/')
 def index():
@@ -296,19 +310,67 @@ def api_simulacoes():
             'alunos_atuais': s['alunos_atuais'],
             'novos_alunos': s['novos_alunos'],
             'aumento': s['aumento_esperado'],
-# Adicione estas importações no início do arquivo
-import os
+            'investimento': s['investimento_total'],
+            'roi': s['roi'],
+            'payback': s['payback']
+        })
+    return jsonify(dados)
 
-# Modifique a parte do if __name__ para:
+# Rota de saúde para monitoramento
+@app.route('/health')
+def health():
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+
+# Página de informações
+@app.route('/info')
+def info():
+    return '''
+    <h1>Sistema de Business Plan Escolar</h1>
+    <p>Versão: 1.0.0</p>
+    <p>Status: Online</p>
+    <p>Última atualização: ''' + datetime.now().strftime('%d/%m/%Y %H:%M:%S') + '''</p>
+    <a href="/">Voltar ao sistema</a>
+    '''
+
+# Tratamento de erros
+@app.errorhandler(404)
+def page_not_found(e):
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    return render_template('500.html'), 500
+
+# Página 404 simples (crie templates/404.html se quiser personalizado)
+@app.route('/404')
+def not_found_page():
+    return '''
+    <div style="text-align: center; padding: 50px;">
+        <h1>404 - Página não encontrada</h1>
+        <p>A página que você está procurando não existe.</p>
+        <a href="/" class="btn btn-primary">Voltar ao Início</a>
+    </div>
+    ''', 404
+
+# Página 500 simples
+@app.route('/500')
+def error_page():
+    return '''
+    <div style="text-align: center; padding: 50px;">
+        <h1>500 - Erro interno</h1>
+        <p>Ocorreu um erro no servidor. Tente novamente mais tarde.</p>
+        <a href="/" class="btn btn-primary">Voltar ao Início</a>
+    </div>
+    ''', 500
+
 if __name__ == '__main__':
     # Inicializar banco de dados
     if init_db():
         print("=" * 60)
         print("🚀 SISTEMA DE BUSINESS PLAN ESCOLAR")
         print("=" * 60)
-        print("📊 Sistema iniciado com sucesso!")
         
-        # Verificar se está em produção
+        # Configurações para produção/desenvolvimento
         port = int(os.environ.get('PORT', 5000))
         debug = os.environ.get('FLASK_ENV') != 'production'
         
@@ -317,26 +379,16 @@ if __name__ == '__main__':
             print("🌐 Acesse: http://localhost:5000")
         else:
             print("🚀 Modo: Produção")
+            print("✅ Pronto para acesso remoto")
         
         print("=" * 60)
-        app.run(debug=debug, port=port, host='0.0.0.0')
-    else:
-        print("❌ Não foi possível inicializar o sistema.")            'roi': s['roi'],
-            'payback': s['payback']
-        })
-    return jsonify(dados)
-
-if __name__ == '__main__':
-    # Inicializar banco de dados
-    if init_db():
-        print("=" * 60)
-        print("🚀 SISTEMA DE BUSINESS PLAN ESCOLAR")
-        print("=" * 60)
-        print("📊 Sistema iniciado com sucesso!")
-        print("🌐 Acesse: http://localhost:5000")
-        print("=" * 60)
-        app.run(debug=True, port=5000)
+        
+        # Executar aplicação
+        app.run(
+            debug=debug, 
+            port=port, 
+            host='0.0.0.0',  # Importante: permite acesso externo
+            threaded=True  # Melhor performance para múltiplas requisições
+        )
     else:
         print("❌ Não foi possível inicializar o sistema.")
-        
-        
