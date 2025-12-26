@@ -1,0 +1,18 @@
+sistema-business-plan/
+│
+├── app.py
+├── requirements.txt
+├── static/
+│   ├── css/
+│   │   └── style.css
+│   └── js/
+│       └── charts.js
+├── templates/
+│   ├── base.html
+│   ├── index.html
+│   ├── simulacao.html
+│   ├── resultado.html
+│   └── dashboard.html
+├── data/
+│   └── database.db
+└── README.md
