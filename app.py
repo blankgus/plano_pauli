@@ -97,7 +97,7 @@ def obter_horario_real(turma_nome, horario):
 def calcular_carga_maxima(serie):
     """Calcula a carga horária máxima semanal baseada na série"""
     if 'em' in serie.lower() or 'medio' in serie.lower() or serie in ['1em', '2em', '3em']:
-        return 40  # Ensino Médio: 40 horas (8 horas por dia × 5 dias)
+        return 35  # Ensino Médio: 35 horas (7 horas por dia × 5 dias)
     else:
         return 25  # EF II: 25 horas
 
