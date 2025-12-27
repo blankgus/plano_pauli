@@ -1,743 +1,1308 @@
-from flask import Flask, render_template_string, request, jsonify, session, redirect
-from datetime import datetime
-import json
-import math
-import os
-import sqlite3
+import streamlit as st
+import pandas as pd
+import database
+from session_state import init_session_state
+from auto_save import salvar_tudo
+from models import Turma, Professor, Disciplina, Sala, DIAS_SEMANA, HORARIOS_EFII, HORARIOS_EM, HORARIOS_REAIS
+from scheduler_ortools import GradeHorariaORTools
+from simple_scheduler import SimpleGradeHoraria
+import io
+import traceback
 
-app = Flask(__name__)
+# Configuração da página
+st.set_page_config(page_title="Escola Timetable", layout="wide")
+st.title("🕒 Gerador Inteligente de Grade Horária - Horários Reais")
 
-# Configuração para produção
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'business_plan_escolar_prod_2024_seguro')
-app.config['TEMPLATES_AUTO_RELOAD'] = os.environ.get('FLASK_ENV') == 'development'
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 31536000
+# Inicialização
+try:
+    init_session_state()
+    st.success("✅ Sistema inicializado com sucesso!")
+except Exception as e:
+    st.error(f"❌ Erro na inicialização: {str(e)}")
+    st.code(traceback.format_exc())
+    if st.button("🔄 Resetar Banco de Dados"):
+        database.resetar_banco()
+        st.rerun()
+    st.stop()
 
-# Configuração do banco de dados
-basedir = os.path.abspath(os.path.dirname(__file__))
-DATABASE = os.path.join(basedir, 'data', 'database.db')
-
-# Dados padrão para custos por nível escolar
-CUSTOS_POR_NIVEL = {
-    'infantil': {
-        'custo_professor_por_hora': 45,
-        'material_mensal_por_aluno': 80,
-        'atividades_especificas': ['Música', 'Artes', 'Psicomotricidade', 'Contação de Histórias'],
-        'infraestrutura_especifica': ['Brinquedoteca', 'Parque infantil', 'Sala multiuso'],
-        'ratio_professor_aluno': 10  # 1 professor para cada 10 alunos
-    },
-    'fundamental_i': {
-        'custo_professor_por_hora': 50,
-        'material_mensal_por_aluno': 60,
-        'atividades_especificas': ['Robótica', 'Programação', 'Teatro', 'Esportes', 'Inglês'],
-        'infraestrutura_especifica': ['Laboratório de informática', 'Quadra poliesportiva', 'Biblioteca'],
-        'ratio_professor_aluno': 15
-    },
-    'fundamental_ii': {
-        'custo_professor_por_hora': 55,
-        'material_mensal_por_aluno': 70,
-        'atividades_especificas': ['Robótica Avançada', 'Olimpíadas Científicas', 'Debate', 'Música Instrumental', 'Esportes Competitivos'],
-        'infraestrutura_especifica': ['Laboratório de ciências', 'Estúdio de música', 'Sala de estudos'],
-        'ratio_professor_aluno': 20
-    },
-    'medio': {
-        'custo_professor_por_hora': 65,
-        'material_mensal_por_aluno': 90,
-        'atividades_especificas': ['Preparatório ENEM', 'Orientação Profissional', 'Projetos Científicos', 'Debates Filosóficos', 'Empreendedorismo'],
-        'infraestrutura_especifica': ['Laboratório avançado', 'Sala de projeção', 'Espaço coworking'],
-        'ratio_professor_aluno': 25
-    }
-}
-
-# Categorias detalhadas de custos
-CATEGORIAS_CUSTOS = {
-    'infraestrutura': {
-        'itens': [
-            {'nome': 'Reforma de salas', 'custo_base': 5000, 'descricao': 'Adaptação para atividades específicas'},
-            {'nome': 'Equipamentos tecnológicos', 'custo_base': 15000, 'descricao': 'Computadores, tablets, projetores'},
-            {'nome': 'Materiais esportivos', 'custo_base': 3000, 'descricao': 'Bolas, redes, equipamentos'},
-            {'nome': 'Instrumentos musicais', 'custo_base': 8000, 'descricao': 'Violões, teclados, percussão'},
-            {'nome': 'Mobiliário especializado', 'custo_base': 7000, 'descricao': 'Mesas, cadeiras, armários'},
-            {'nome': 'Kit robótica/programação', 'custo_base': 12000, 'descricao': 'Kits Arduino, impressora 3D'}
-        ]
-    },
-    'material': {
-        'itens': [
-            {'nome': 'Material didático', 'custo_base': 2000, 'por_aluno': True},
-            {'nome': 'Kits de atividades', 'custo_base': 1500, 'por_aluno': True},
-            {'nome': 'Uniformes', 'custo_base': 3000, 'por_aluno': True},
-            {'nome': 'Material de consumo', 'custo_base': 1000, 'descricao': 'Papel, tinta, etc'},
-            {'nome': 'Livros paradidáticos', 'custo_base': 4000, 'por_aluno': True}
-        ]
-    },
-    'marketing': {
-        'itens': [
-            {'nome': 'Site e redes sociais', 'custo_base': 3000, 'descricao': 'Desenvolvimento e manutenção'},
-            {'nome': 'Material impresso', 'custo_base': 1500, 'descricao': 'Folhetos, banners, cartazes'},
-            {'nome': 'Eventos de divulgação', 'custo_base': 5000, 'descricao': 'Open school, workshops'},
-            {'nome': 'Publicidade online', 'custo_base': 4000, 'descricao': 'Google Ads, redes sociais'},
-            {'nome': 'Produção de vídeos', 'custo_base': 6000, 'descricao': 'Vídeos institucionais'}
-        ]
-    },
-    'recursos_humanos': {
-        'itens': [
-            {'nome': 'Capacitação de professores', 'custo_base': 8000, 'descricao': 'Cursos e workshops'},
-            {'nome': 'Contratação especialistas', 'custo_base': 15000, 'descricao': 'Professores específicos'},
-            {'nome': 'Equipe de apoio', 'custo_base': 6000, 'descricao': 'Coordenadores, monitores'},
-            {'nome': 'Benefícios e encargos', 'custo_base': 10000, 'descricao': 'VT, VR, saúde'}
-        ]
-    }
-}
-
-def init_db():
-    """Inicializa o banco de dados SQLite"""
+# Função auxiliar
+def obter_grupo_seguro(objeto, opcoes=["A", "B", "AMBOS"]):
     try:
-        data_dir = os.path.join(basedir, 'data')
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir, exist_ok=True)
-        
-        conn = sqlite3.connect(DATABASE)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS simulacoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT,
-            data_criacao TEXT,
-            alunos_atuais INTEGER,
-            mensalidade_media REAL,
-            aumento_esperado REAL,
-            novos_alunos INTEGER,
-            nivel_escolar TEXT,
-            atividades_selecionadas TEXT,
-            custos_detalhados TEXT,
-            receita_mensal_atual REAL,
-            receita_projetada REAL,
-            investimento_total REAL,
-            retorno_mensal REAL,
-            payback REAL,
-            roi REAL,
-            dados TEXT
-        )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        print("✅ Banco de dados inicializado com sucesso!")
-        return True
-    except Exception as e:
-        print(f"❌ Erro ao inicializar banco de dados: {e}")
-        return False
+        if hasattr(objeto, 'grupo'):
+            grupo = objeto.grupo
+            if grupo in opcoes:
+                return grupo
+        return "A"
+    except:
+        return "A"
 
-def salvar_simulacao(dados_entrada, resultados, custos_detalhados):
-    """Salva uma simulação no banco de dados"""
-    try:
-        conn = sqlite3.connect(DATABASE)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT INTO simulacoes (
-            nome, data_criacao, alunos_atuais, mensalidade_media,
-            aumento_esperado, novos_alunos, nivel_escolar,
-            atividades_selecionadas, custos_detalhados,
-            receita_mensal_atual, receita_projetada, investimento_total,
-            retorno_mensal, payback, roi, dados
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            f"Simulação {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            dados_entrada.get('alunos_atuais', 0),
-            dados_entrada.get('mensalidade_media', 0),
-            dados_entrada.get('aumento_esperado', 0),
-            resultados.get('novos_alunos', 0),
-            dados_entrada.get('nivel_escolar', 'fundamental_i'),
-            json.dumps(dados_entrada.get('atividades_selecionadas', [])),
-            json.dumps(custos_detalhados),
-            resultados.get('receita_atual', 0),
-            resultados.get('receita_projetada', 0),
-            resultados.get('investimento_total', 0),
-            resultados.get('retorno_mensal', 0),
-            resultados.get('payback_meses', 0),
-            resultados.get('roi_percentual', 0),
-            json.dumps({'entrada': dados_entrada, 'resultados': resultados, 'custos_detalhados': custos_detalhados})
-        ))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Erro ao salvar simulação: {e}")
-        return False
+def obter_segmento_turma(turma_nome):
+    """Determina o segmento da turma baseado no nome"""
+    if 'em' in turma_nome.lower():
+        return "EM"
+    else:
+        return "EF_II"
 
-def buscar_simulacoes():
-    """Busca todas as simulações do banco de dados"""
-    try:
-        conn = sqlite3.connect(DATABASE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM simulacoes ORDER BY data_criacao DESC')
-        simulacoes = cursor.fetchall()
-        
-        conn.close()
-        return simulacoes
-    except Exception as e:
-        print(f"Erro ao buscar simulações: {e}")
-        return []
+def obter_horarios_turma(turma_nome):
+    """Retorna os horários disponíveis para a turma"""
+    segmento = obter_segmento_turma(turma_nome)
+    if segmento == "EM":
+        # EM: SEMPRE 7 períodos até 12:20 + 8º período até 13:10
+        return [1, 2, 3, 4, 5, 6, 7, 8]  # EM: 8 aulas com intervalo
+    else:
+        return HORARIOS_EFII  # EF II: 5 aulas + intervalo
 
-def buscar_simulacao_por_id(id):
-    """Busca uma simulação específica por ID"""
-    try:
-        conn = sqlite3.connect(DATABASE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM simulacoes WHERE id = ?', (id,))
-        simulacao = cursor.fetchone()
-        
-        conn.close()
-        return simulacao
-    except Exception as e:
-        print(f"Erro ao buscar simulação: {e}")
-        return None
+def obter_horario_real(turma_nome, horario):
+    """Retorna o horário real formatado baseado no segmento da turma"""
+    segmento = obter_segmento_turma(turma_nome)
+    
+    if segmento == "EM":
+        # Horários do EM - sempre até 13:10
+        if horario == 1:
+            return "07:00 - 07:50"
+        elif horario == 2:
+            return "07:50 - 08:40"
+        elif horario == 3:
+            return "08:40 - 09:30"
+        elif horario == 4:
+            return "09:30 - 09:50 (Intervalo)"
+        elif horario == 5:
+            return "09:50 - 10:40"
+        elif horario == 6:
+            return "10:40 - 11:30"
+        elif horario == 7:
+            return "11:30 - 12:20"
+        elif horario == 8:
+            return "12:20 - 13:10"
+        else:
+            return f"Horário {horario}"
+    else:
+        # Horários do EF II
+        if horario == 1:
+            return "07:50 - 08:40"
+        elif horario == 2:
+            return "08:40 - 09:30"
+        elif horario == 3:
+            return "09:30 - 09:50 (Intervalo)"
+        elif horario == 4:
+            return "09:50 - 10:40"
+        elif horario == 5:
+            return "10:40 - 11:30"
+        elif horario == 6:
+            return "11:30 - 12:20"
+        else:
+            return f"Horário {horario}"
 
-# Funções de cálculo aprimoradas
-def calcular_custos_detalhados(dados_entrada):
-    """Calcula custos detalhados por categoria"""
-    nivel = dados_entrada.get('nivel_escolar', 'fundamental_i')
-    alunos_atuais = dados_entrada.get('alunos_atuais', 0)
-    novos_alunos = int(alunos_atuais * (dados_entrada.get('aumento_esperado', 0) / 100))
-    total_alunos_projetado = alunos_atuais + novos_alunos
+# Função para calcular carga horária máxima por série
+def calcular_carga_maxima(serie):
+    """Calcula a carga horária máxima semanal baseada na série"""
+    if 'em' in serie.lower() or 'medio' in serie.lower() or serie in ['1em', '2em', '3em']:
+        return 40  # Ensino Médio: 40 horas (8 horas por dia × 5 dias)
+    else:
+        return 25  # EF II: 25 horas
+
+# Função para converter entre formatos de dias
+def converter_dia_para_semana(dia):
+    """Converte dia do formato completo para abreviado (DIAS_SEMANA)"""
+    if dia == "segunda": return "seg"
+    elif dia == "terca": return "ter"
+    elif dia == "quarta": return "qua"
+    elif dia == "quinta": return "qui"
+    elif dia == "sexta": return "sex"
+    else: return dia
+
+def converter_dia_para_completo(dia):
+    """Converte dia do formato abreviado para completo"""
+    if dia == "seg": return "segunda"
+    elif dia == "ter": return "terca"
+    elif dia == "qua": return "quarta"
+    elif dia == "qui": return "quinta"
+    elif dia == "sex": return "sexta"
+    else: return dia
+
+def converter_disponibilidade_para_semana(disponibilidade):
+    """Converte conjunto de disponibilidade para formato DIAS_SEMANA"""
+    convertido = []
+    for dia in disponibilidade:
+        dia_convertido = converter_dia_para_semana(dia)
+        if dia_convertido in DIAS_SEMANA:
+            convertido.append(dia_convertido)
+    return convertido
+
+def converter_disponibilidade_para_completo(disponibilidade):
+    """Converte conjunto de disponibilidade para formato completo"""
+    convertido = set()
+    for dia in disponibilidade:
+        convertido.add(converter_dia_para_completo(dia))
+    return convertido
+
+# Menu de abas
+abas = st.tabs(["🏠 Início", "📚 Disciplinas", "👩‍🏫 Professores", "🎒 Turmas", "🏫 Salas", "🗓️ Gerar Grade", "👨‍🏫 Grade por Professor"])
+
+with abas[0]:  # ABA INÍCIO
+    st.header("Dashboard")
     
-    # Configurações do nível escolar
-    config_nivel = CUSTOS_POR_NIVEL.get(nivel, CUSTOS_POR_NIVEL['fundamental_i'])
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Turmas", len(st.session_state.turmas))
+    with col2:
+        st.metric("Professores", len(st.session_state.professores))
+    with col3:
+        st.metric("Disciplinas", len(st.session_state.disciplinas))
+    with col4:
+        st.metric("Salas", len(st.session_state.salas))
     
-    # Atividades selecionadas
-    atividades_selecionadas = dados_entrada.get('atividades_selecionadas', [])
-    num_atividades = len(atividades_selecionadas) if atividades_selecionadas else 3
+    # Estatísticas por grupo e segmento
+    st.subheader("📊 Estatísticas por Segmento")
     
-    # Cálculo de professores necessários
-    ratio = config_nivel['ratio_professor_aluno']
-    professores_necessarios = math.ceil(total_alunos_projetado / ratio)
+    turmas_efii = [t for t in st.session_state.turmas if obter_segmento_turma(t.nome) == "EF_II"]
+    turmas_em = [t for t in st.session_state.turmas if obter_segmento_turma(t.nome) == "EM"]
     
-    custos_detalhados = {
-        'categorias': {},
-        'resumo': {},
-        'nivel_escolar': nivel,
-        'atividades_selecionadas': atividades_selecionadas
-    }
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("**Ensino Fundamental II**")
+        st.write(f"Turmas: {len(turmas_efii)}")
+        st.write(f"Horário: 07:50 - 12:20")
+        st.write(f"Períodos: 6 aulas + intervalo")
+        
+    with col2:
+        st.write("**Ensino Médio**")
+        st.write(f"Turmas: {len(turmas_em)}")
+        st.write(f"Horário: 07:00 - 13:10")
+        st.write(f"Períodos: 8 aulas + intervalo")
     
-    # 1. CUSTOS COM PROFESSORES
-    horas_semanais = dados_entrada.get('horas_semanais', 10)
-    semanas_mes = 4.3
-    custo_hora = config_nivel['custo_professor_por_hora']
+    # Verificação de carga horária
+    st.subheader("📈 Verificação de Carga Horária")
+    for turma in st.session_state.turmas:
+        carga_total = 0
+        disciplinas_turma = []
+        grupo_turma = obter_grupo_seguro(turma)
+        segmento = obter_segmento_turma(turma.nome)
+        
+        # ✅ CORREÇÃO: Verificar disciplinas vinculadas DIRETAMENTE à turma
+        for disc in st.session_state.disciplinas:
+            if turma.nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
+                carga_total += disc.carga_semanal
+                disciplinas_turma.append(f"{disc.nome} ({disc.carga_semanal}h)")
+        
+        carga_maxima = calcular_carga_maxima(turma.serie)
+        status = "✅" if carga_total <= carga_maxima else "❌"
+        
+        st.write(f"**{turma.nome}** [{grupo_turma}] ({segmento}): {carga_total}/{carga_maxima}h {status}")
+        if disciplinas_turma:
+            st.caption(f"Disciplinas: {', '.join(disciplinas_turma)}")
+        else:
+            st.caption("⚠️ Nenhuma disciplina atribuída para este grupo")
     
-    custo_professores = professores_necessarios * custo_hora * horas_semanais * semanas_mes
-    custos_detalhados['categorias']['professores'] = {
-        'total': custo_professores,
-        'detalhes': [
-            {'item': f'Professores especializados ({professores_necessarios})', 'valor': custo_professores * 0.7},
-            {'item': 'Coordenador de atividades', 'valor': custo_professores * 0.2},
-            {'item': 'Substituições e reserva', 'valor': custo_professores * 0.1}
-        ]
-    }
+    if st.button("💾 Salvar Tudo no Banco"):
+        try:
+            if salvar_tudo():
+                st.success("✅ Todos os dados salvos!")
+            else:
+                st.error("❌ Erro ao salvar dados")
+        except Exception as e:
+            st.error(f"❌ Erro ao salvar: {str(e)}")
+
+with abas[1]:  # ABA DISCIPLINAS
+    st.header("📚 Disciplinas")
     
-    # 2. CUSTOS DE INFRAESTRUTURA (seleção do usuário)
-    infra_itens_selecionados = dados_entrada.get('infra_itens_selecionados', [])
-    custo_infra = 0
-    detalhes_infra = []
+    grupo_filtro = st.selectbox("Filtrar por Grupo", ["Todos", "A", "B"], key="filtro_disc")
     
-    for item_nome in infra_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['infraestrutura']['itens']:
-            if item['nome'] == item_nome:
-                custo_item = item['custo_base']
-                # Ajuste por nível escolar
-                if nivel == 'infantil':
-                    custo_item *= 0.8
-                elif nivel == 'medio':
-                    custo_item *= 1.2
-                
-                custo_infra += custo_item
-                detalhes_infra.append({
-                    'item': item_nome,
-                    'valor': custo_item,
-                    'descricao': item.get('descricao', '')
-                })
-                break
-    
-    if not detalhes_infra:
-        # Valor padrão se nenhum item selecionado
-        custo_infra = dados_entrada.get('custo_infraestrutura', 1000)
-        detalhes_infra.append({
-            'item': 'Adaptações básicas',
-            'valor': custo_infra,
-            'descricao': 'Reformas e adaptações necessárias'
-        })
-    
-    custos_detalhados['categorias']['infraestrutura'] = {
-        'total': custo_infra,
-        'detalhes': detalhes_infra
-    }
-    
-    # 3. CUSTOS DE MATERIAL (por aluno)
-    material_itens_selecionados = dados_entrada.get('material_itens_selecionados', [])
-    custo_material = 0
-    detalhes_material = []
-    
-    for item_nome in material_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['material']['itens']:
-            if item['nome'] == item_nome:
-                if item.get('por_aluno', False):
-                    custo_item = item['custo_base'] * total_alunos_projetado
+    with st.expander("➕ Adicionar Nova Disciplina", expanded=False):
+        with st.form("add_disc"):
+            col1, col2 = st.columns(2)
+            with col1:
+                nome = st.text_input("Nome da Disciplina*")
+                carga = st.number_input("Carga Semanal*", 1, 10, 3)
+                tipo = st.selectbox("Tipo*", ["pesada", "media", "leve", "pratica"])
+            with col2:
+                # ✅ MUDANÇA: Selecionar turmas específicas em vez de séries
+                turmas_opcoes = [t.nome for t in st.session_state.turmas]
+                turmas_selecionadas = st.multiselect("Turmas*", turmas_opcoes)
+                grupo = st.selectbox("Grupo*", ["A", "B"])
+                cor_fundo = st.color_picker("Cor de Fundo", "#4A90E2")
+                cor_fonte = st.color_picker("Cor da Fonte", "#FFFFFF")
+            
+            if st.form_submit_button("✅ Adicionar Disciplina"):
+                if nome and turmas_selecionadas:
+                    try:
+                        nova_disciplina = Disciplina(
+                            nome, carga, tipo, turmas_selecionadas, grupo, cor_fundo, cor_fonte
+                        )
+                        st.session_state.disciplinas.append(nova_disciplina)
+                        if salvar_tudo():
+                            st.success(f"✅ Disciplina '{nome}' adicionada!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Erro ao adicionar disciplina: {str(e)}")
                 else:
-                    custo_item = item['custo_base']
+                    st.error("❌ Preencha todos os campos obrigatórios (*)")
+    
+    st.subheader("📋 Lista de Disciplinas")
+    
+    disciplinas_exibir = st.session_state.disciplinas
+    if grupo_filtro != "Todos":
+        disciplinas_exibir = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == grupo_filtro]
+    
+    if not disciplinas_exibir:
+        st.info("📝 Nenhuma disciplina cadastrada. Use o formulário acima para adicionar.")
+    
+    for disc in disciplinas_exibir:
+        with st.expander(f"📖 {disc.nome} [{obter_grupo_seguro(disc)}]", expanded=False):
+            with st.form(f"edit_disc_{disc.id}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    novo_nome = st.text_input("Nome", disc.nome, key=f"nome_{disc.id}")
+                    nova_carga = st.number_input("Carga Semanal", 1, 10, disc.carga_semanal, key=f"carga_{disc.id}")
+                    novo_tipo = st.selectbox(
+                        "Tipo", 
+                        ["pesada", "media", "leve", "pratica"],
+                        index=["pesada", "media", "leve", "pratica"].index(disc.tipo),
+                        key=f"tipo_{disc.id}"
+                    )
+                with col2:
+                    # ✅ MUDANÇA: Editar turmas específicas
+                    turmas_opcoes = [t.nome for t in st.session_state.turmas]
+                    turmas_selecionadas = st.multiselect(
+                        "Turmas", 
+                        turmas_opcoes,
+                        default=disc.turmas,
+                        key=f"turmas_{disc.id}"
+                    )
+                    novo_grupo = st.selectbox(
+                        "Grupo", 
+                        ["A", "B"],
+                        index=0 if obter_grupo_seguro(disc) == "A" else 1,
+                        key=f"grupo_{disc.id}"
+                    )
+                    nova_cor_fundo = st.color_picker("Cor de Fundo", disc.cor_fundo, key=f"cor_fundo_{disc.id}")
+                    nova_cor_fonte = st.color_picker("Cor da Fonte", disc.cor_fonte, key=f"cor_fonte_{disc.id}")
                 
-                custo_material += custo_item
-                detalhes_material.append({
-                    'item': item_nome,
-                    'valor': custo_item,
-                    'por_aluno': item.get('por_aluno', False)
-                })
-                break
-    
-    if not detalhes_material:
-        # Valor padrão por aluno
-        custo_material_por_aluno = config_nivel['material_mensal_por_aluno']
-        custo_material = custo_material_por_aluno * total_alunos_projetado
-        detalhes_material.append({
-            'item': 'Material didático básico',
-            'valor': custo_material,
-            'por_aluno': True
-        })
-    
-    custos_detalhados['categorias']['material'] = {
-        'total': custo_material,
-        'detalhes': detalhes_material
-    }
-    
-    # 4. CUSTOS DE MARKETING
-    marketing_itens_selecionados = dados_entrada.get('marketing_itens_selecionados', [])
-    custo_marketing = 0
-    detalhes_marketing = []
-    
-    for item_nome in marketing_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['marketing']['itens']:
-            if item['nome'] == item_nome:
-                custo_marketing += item['custo_base']
-                detalhes_marketing.append({
-                    'item': item_nome,
-                    'valor': item['custo_base'],
-                    'descricao': item.get('descricao', '')
-                })
-                break
-    
-    if not detalhes_marketing:
-        custo_marketing = dados_entrada.get('custo_marketing', 800)
-        detalhes_marketing.append({
-            'item': 'Divulgação básica',
-            'valor': custo_marketing,
-            'descricao': 'Campanha inicial de divulgação'
-        })
-    
-    custos_detalhados['categorias']['marketing'] = {
-        'total': custo_marketing,
-        'detalhes': detalhes_marketing
-    }
-    
-    # 5. CUSTOS COM RECURSOS HUMANOS
-    rh_itens_selecionados = dados_entrada.get('rh_itens_selecionados', [])
-    custo_rh = 0
-    detalhes_rh = []
-    
-    for item_nome in rh_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['recursos_humanos']['itens']:
-            if item['nome'] == item_nome:
-                custo_rh += item['custo_base']
-                detalhes_rh.append({
-                    'item': item_nome,
-                    'valor': item['custo_base'],
-                    'descricao': item.get('descricao', '')
-                })
-                break
-    
-    if not detalhes_rh:
-        custo_rh = 5000  # Valor padrão
-        detalhes_rh.append({
-            'item': 'Treinamento básico',
-            'valor': custo_rh,
-            'descricao': 'Capacitação inicial da equipe'
-        })
-    
-    custos_detalhados['categorias']['recursos_humanos'] = {
-        'total': custo_rh,
-        'detalhes': detalhes_rh
-    }
-    
-    # 6. OUTROS CUSTOS
-    outros_custos = dados_entrada.get('outros_custos', 200)
-    custos_detalhados['categorias']['outros'] = {
-        'total': outros_custos,
-        'detalhes': [{'item': 'Custos diversos', 'valor': outros_custos}]
-    }
-    
-    # Resumo geral
-    investimento_total = sum([cat['total'] for cat in custos_detalhados['categorias'].values()])
-    
-    custos_detalhados['resumo'] = {
-        'investimento_total': investimento_total,
-        'professores_necessarios': professores_necessarios,
-        'custo_medio_por_aluno': investimento_total / total_alunos_projetado if total_alunos_projetado > 0 else 0,
-        'custo_medio_por_atividade': investimento_total / num_atividades if num_atividades > 0 else 0
-    }
-    
-    return custos_detalhados
-
-def calcular_projecao(dados_entrada, custos_detalhados):
-    """Calcula todas as projeções baseadas nos dados inseridos"""
-    
-    alunos_atuais = dados_entrada.get('alunos_atuais', 0)
-    mensalidade = dados_entrada.get('mensalidade_media', 0)
-    aumento_percentual = dados_entrada.get('aumento_esperado', 0) / 100
-    
-    # Cálculo de novos alunos
-    novos_alunos = int(alunos_atuais * aumento_percentual)
-    
-    # Receitas
-    receita_atual = alunos_atuais * mensalidade
-    receita_projetada = (alunos_atuais + novos_alunos) * mensalidade
-    
-    # Custos do investimento
-    investimento_total = custos_detalhados['resumo']['investimento_total']
-    
-    # Retorno mensal adicional
-    retorno_mensal = novos_alunos * mensalidade
-    
-    # Cálculo de payback e ROI
-    if retorno_mensal > 0:
-        payback_meses = investimento_total / retorno_mensal
-    else:
-        payback_meses = 0
-        
-    if investimento_total > 0:
-        roi_percentual = (retorno_mensal * 12 / investimento_total) * 100
-    else:
-        roi_percentual = 0
-    
-    return {
-        'novos_alunos': novos_alunos,
-        'receita_atual': receita_atual,
-        'receita_projetada': receita_projetada,
-        'investimento_total': investimento_total,
-        'retorno_mensal': retorno_mensal,
-        'payback_meses': payback_meses,
-        'roi_percentual': roi_percentual,
-        'professores_necessarios': custos_detalhados['resumo']['professores_necessarios'],
-        'custo_medio_por_aluno': custos_detalhados['resumo']['custo_medio_por_aluno'],
-        'custo_medio_por_atividade': custos_detalhados['resumo']['custo_medio_por_atividade']
-    }
-
-# Templates HTML inline
-def get_base_html(title="Business Plan Escolar", content=""):
-    """Retorna o HTML base para todas as páginas"""
-    return f'''<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title}</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        :root {{
-            --primary-color: #4361ee;
-            --secondary-color: #3a0ca3;
-            --success-color: #4cc9f0;
-            --infantil-color: #FF6B8B;
-            --fundamental-color: #4ECDC4;
-            --medio-color: #45B7D1;
-        }}
-        body {{
-            background-color: #f5f7fb;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            min-height: 100vh;
-        }}
-        .navbar-brand {{
-            font-weight: 700;
-            font-size: 1.5rem;
-        }}
-        .card {{
-            border-radius: 10px;
-            border: none;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            margin-bottom: 20px;
-        }}
-        .card-header {{
-            border-radius: 10px 10px 0 0 !important;
-            font-weight: 600;
-        }}
-        .btn-primary {{
-            background-color: var(--primary-color);
-            border-color: var(--primary-color);
-        }}
-        .btn-primary:hover {{
-            background-color: var(--secondary-color);
-            border-color: var(--secondary-color);
-        }}
-        .nivel-infantil {{ border-left: 5px solid var(--infantil-color) !important; }}
-        .nivel-fundamental {{ border-left: 5px solid var(--fundamental-color) !important; }}
-        .nivel-medio {{ border-left: 5px solid var(--medio-color) !important; }}
-        
-        .costo-item {{
-            transition: all 0.3s ease;
-            cursor: pointer;
-        }}
-        .costo-item:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }}
-        .costo-seleccionado {{
-            background-color: #e8f4fd !important;
-            border-color: var(--primary-color) !important;
-        }}
-        
-        .hero-section {{
-            background: linear-gradient(135deg, #4361ee 0%, #3a0ca3 100%);
-            color: white;
-            padding: 40px;
-            border-radius: 15px;
-            margin-bottom: 30px;
-        }}
-        
-        .badge-nivel {{
-            font-size: 0.8em;
-            padding: 5px 10px;
-            border-radius: 20px;
-        }}
-        .badge-infantil {{ background-color: var(--infantil-color); }}
-        .badge-fundamental {{ background-color: var(--fundamental-color); }}
-        .badge-medio {{ background-color: var(--medio-color); }}
-        
-        footer {{
-            background-color: #2c3e50;
-            color: white;
-            padding: 20px 0;
-            margin-top: 40px;
-        }}
-        
-        .sticky-summary {{
-            position: sticky;
-            top: 20px;
-            background: white;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }}
-    </style>
-</head>
-<body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
-            <a class="navbar-brand" href="/">
-                <i class="fas fa-chart-line"></i> Business Plan Escolar
-            </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav ms-auto">
-                    <li class="nav-item">
-                        <a class="nav-link" href="/">Início</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/simulacao">Nova Simulação</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/dashboard">Dashboard</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/info">
-                            <i class="fas fa-info-circle"></i> Info
-                        </a>
-                    </li>
-                </ul>
-            </div>
-        </div>
-    </nav>
-
-    <div class="container mt-4">
-        {content}
-    </div>
-
-    <footer class="bg-dark text-white mt-5">
-        <div class="container text-center">
-            <p>Sistema de Business Plan para Escolas - Análise detalhada de custos por nível escolar</p>
-            <p class="mb-0">© 2024 - Desenvolvido com Python, Flask e SQLite</p>
-        </div>
-    </footer>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>'''
-
-# Rotas da aplicação
-@app.route('/')
-def index():
-    content = '''
-    <div class="row">
-        <div class="col-lg-8 mx-auto text-center">
-            <div class="hero-section">
-                <h1 class="display-4 mb-4">
-                    <i class="fas fa-school"></i> Sistema de Business Plan Escolar
-                </h1>
-                <p class="lead mb-4">
-                    Ferramenta avançada para análise de custo-benefício com <strong>custos específicos por nível escolar</strong>
-                    visando aumentar em <strong>30% a 50%</strong> o número de matrículas.
-                </p>
-                <div class="row mt-5">
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-primary">
-                            <div class="card-body">
-                                <i class="fas fa-baby fa-3x text-primary mb-3"></i>
-                                <h4>Educação Infantil</h4>
-                                <p>Custos específicos para berçário ao infantil</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-success">
-                            <div class="card-body">
-                                <i class="fas fa-graduation-cap fa-3x text-success mb-3"></i>
-                                <h4>Fundamental I</h4>
-                                <p>Anos iniciais do ensino fundamental</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-info">
-                            <div class="card-body">
-                                <i class="fas fa-book fa-3x text-info mb-3"></i>
-                                <h4>Fundamental II</h4>
-                                <p>Anos finais do ensino fundamental</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-warning">
-                            <div class="card-body">
-                                <i class="fas fa-university fa-3x text-warning mb-3"></i>
-                                <h4>Ensino Médio</h4>
-                                <p>Preparação para vestibular e ENEM</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("💾 Salvar Alterações"):
+                        if novo_nome and turmas_selecionadas:
+                            try:
+                                disc.nome = novo_nome
+                                disc.carga_semanal = nova_carga
+                                disc.tipo = novo_tipo
+                                disc.turmas = turmas_selecionadas
+                                disc.grupo = novo_grupo
+                                disc.cor_fundo = nova_cor_fundo
+                                disc.cor_fonte = nova_cor_fonte
+                                
+                                if salvar_tudo():
+                                    st.success("✅ Disciplina atualizada!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Erro ao atualizar: {str(e)}")
+                        else:
+                            st.error("❌ Preencha todos os campos obrigatórios")
                 
-                <a href="/simulacao" class="btn btn-primary btn-lg mt-4">
-                    <i class="fas fa-play-circle"></i> Iniciar Nova Simulação
-                </a>
-            </div>
-        </div>
-    </div>
+                with col2:
+                    if st.form_submit_button("🗑️ Excluir Disciplina", type="secondary"):
+                        try:
+                            st.session_state.disciplinas.remove(disc)
+                            if salvar_tudo():
+                                st.success("✅ Disciplina excluída!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Erro ao excluir: {str(e)}")
 
-    <div class="row mt-5">
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-header bg-info text-white">
-                    <h4><i class="fas fa-bullseye"></i> Novas Funcionalidades</h4>
-                </div>
-                <div class="card-body">
-                    <ul class="list-group list-group-flush">
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Custos por nível escolar</strong> - Infantil, Fundamental I/II, Médio
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Seleção de atividades específicas</strong> por nível
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Custos detalhados por categoria</strong> - Infraestrutura, Material, etc.
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Cálculo automático de professores</strong> necessários
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Seleção de itens de custo</strong> personalizável
-                        </li>
-                    </ul>
-                </div>
-            </div>
-        </div>
+with abas[2]:  # ABA PROFESSORES
+    st.header("👩‍🏫 Professores")
+    
+    grupo_filtro = st.selectbox("Filtrar por Grupo", ["Todos", "A", "B", "AMBOS"], key="filtro_prof")
+    disc_nomes = [d.nome for d in st.session_state.disciplinas]
+    
+    with st.expander("➕ Adicionar Novo Professor", expanded=False):
+        with st.form("add_prof"):
+            col1, col2 = st.columns(2)
+            with col1:
+                nome = st.text_input("Nome do Professor*")
+                disciplinas = st.multiselect("Disciplinas*", disc_nomes)
+                grupo = st.selectbox("Grupo*", ["A", "B", "AMBOS"])
+            with col2:
+                disponibilidade = st.multiselect("Dias Disponíveis*", DIAS_SEMANA, default=DIAS_SEMANA)
+                st.write("**Horários Indisponíveis:**")
+                
+                horarios_indisponiveis = []
+                for dia in DIAS_SEMANA:
+                    with st.container():
+                        st.write(f"**{dia.upper()}:**")
+                        # Mostrar todos os horários possíveis (1-8 para EM, 1-6 para EF II)
+                        horarios_cols = st.columns(4)
+                        horarios_todos = list(range(1, 9))  # 1-8 para cobrir EM
+                        for i, horario in enumerate(horarios_todos):
+                            with horarios_cols[i % 4]:
+                                if st.checkbox(f"{horario}º", key=f"add_{dia}_{horario}"):
+                                    horarios_indisponiveis.append(f"{dia}_{horario}")
+            
+            if st.form_submit_button("✅ Adicionar Professor"):
+                if nome and disciplinas and disponibilidade:
+                    try:
+                        # Converter para formato completo para compatibilidade
+                        disponibilidade_completa = converter_disponibilidade_para_completo(disponibilidade)
+                        
+                        novo_professor = Professor(
+                            nome, 
+                            disciplinas, 
+                            disponibilidade_completa, 
+                            grupo,
+                            set(horarios_indisponiveis)
+                        )
+                        st.session_state.professores.append(novo_professor)
+                        if salvar_tudo():
+                            st.success(f"✅ Professor '{nome}' adicionado!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Erro ao adicionar professor: {str(e)}")
+                else:
+                    st.error("❌ Preencha todos os campos obrigatórios (*)")
+    
+    st.subheader("📋 Lista de Professores")
+    
+    professores_exibir = st.session_state.professores
+    if grupo_filtro != "Todos":
+        professores_exibir = [p for p in st.session_state.professores if obter_grupo_seguro(p) == grupo_filtro]
+    
+    if not professores_exibir:
+        st.info("📝 Nenhum professor cadastrado. Use o formulário acima para adicionar.")
+    
+    for prof in professores_exibir:
+        with st.expander(f"👨‍🏫 {prof.nome} [{obter_grupo_seguro(prof)}]", expanded=False):
+            disciplinas_validas = [d for d in prof.disciplinas if d in disc_nomes]
+            
+            with st.form(f"edit_prof_{prof.id}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    novo_nome = st.text_input("Nome", prof.nome, key=f"nome_prof_{prof.id}")
+                    novas_disciplinas = st.multiselect(
+                        "Disciplinas", 
+                        disc_nomes, 
+                        default=disciplinas_validas,
+                        key=f"disc_prof_{prof.id}"
+                    )
+                    novo_grupo = st.selectbox(
+                        "Grupo", 
+                        ["A", "B", "AMBOS"],
+                        index=["A", "B", "AMBOS"].index(obter_grupo_seguro(prof)),
+                        key=f"grupo_prof_{prof.id}"
+                    )
+                with col2:
+                    # ✅ CORREÇÃO: Converter disponibilidade para formato DIAS_SEMANA
+                    disponibilidade_convertida = converter_disponibilidade_para_semana(prof.disponibilidade)
+                    
+                    nova_disponibilidade = st.multiselect(
+                        "Dias Disponíveis", 
+                        DIAS_SEMANA, 
+                        default=disponibilidade_convertida,
+                        key=f"disp_prof_{prof.id}"
+                    )
+                    
+                    st.write("**Horários Indisponíveis:**")
+                    novos_horarios_indisponiveis = []
+                    horarios_todos = list(range(1, 9))  # 1-8 para cobrir EM
+                    for dia in DIAS_SEMANA:
+                        with st.container():
+                            st.write(f"**{dia.upper()}:**")
+                            horarios_cols = st.columns(4)
+                            for i, horario in enumerate(horarios_todos):
+                                with horarios_cols[i % 4]:
+                                    checked = f"{dia}_{horario}" in prof.horarios_indisponiveis
+                                    if st.checkbox(
+                                        f"{horario}º", 
+                                        value=checked,
+                                        key=f"edit_{prof.id}_{dia}_{horario}"
+                                    ):
+                                        novos_horarios_indisponiveis.append(f"{dia}_{horario}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("💾 Salvar Alterações"):
+                        if novo_nome and novas_disciplinas and nova_disponibilidade:
+                            try:
+                                prof.nome = novo_nome
+                                prof.disciplinas = novas_disciplinas
+                                prof.grupo = novo_grupo
+                                
+                                # Converter de volta para formato completo
+                                disponibilidade_completa = converter_disponibilidade_para_completo(nova_disponibilidade)
+                                
+                                prof.disponibilidade = disponibilidade_completa
+                                prof.horarios_indisponiveis = set(novos_horarios_indisponiveis)
+                                
+                                if salvar_tudo():
+                                    st.success("✅ Professor atualizado!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Erro ao atualizar: {str(e)}")
+                        else:
+                            st.error("❌ Preencha todos os campos obrigatórios")
+                
+                with col2:
+                    if st.form_submit_button("🗑️ Excluir Professor", type="secondary"):
+                        try:
+                            st.session_state.professores.remove(prof)
+                            if salvar_tudo():
+                                st.success("✅ Professor excluído!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Erro ao excluir: {str(e)}")
+
+with abas[3]:  # ABA TURMAS
+    st.header("🎒 Turmas")
+    
+    grupo_filtro = st.selectbox("Filtrar por Grupo", ["Todos", "A", "B"], key="filtro_turma")
+    
+    with st.expander("➕ Adicionar Nova Turma", expanded=False):
+        with st.form("add_turma"):
+            col1, col2 = st.columns(2)
+            with col1:
+                nome = st.text_input("Nome da Turma* (ex: 8anoA)")
+                serie = st.text_input("Série* (ex: 8ano)")
+            with col2:
+                turno = st.selectbox("Turno*", ["manha"], disabled=True)
+                grupo = st.selectbox("Grupo*", ["A", "B"])
+            
+            # Determinar segmento automaticamente
+            segmento = "EM" if serie and 'em' in serie.lower() else "EF_II"
+            st.info(f"💡 Segmento: {segmento} - {calcular_carga_maxima(serie)}h semanais máximas")
+            
+            if st.form_submit_button("✅ Adicionar Turma"):
+                if nome and serie:
+                    try:
+                        nova_turma = Turma(nome, serie, "manha", grupo, segmento)
+                        st.session_state.turmas.append(nova_turma)
+                        if salvar_tudo():
+                            st.success(f"✅ Turma '{nome}' adicionada!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Erro ao adicionar turma: {str(e)}")
+                else:
+                    st.error("❌ Preencha todos os campos obrigatórios (*)")
+    
+    st.subheader("📋 Lista de Turmas")
+    
+    turmas_exibir = st.session_state.turmas
+    if grupo_filtro != "Todos":
+        turmas_exibir = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == grupo_filtro]
+    
+    if not turmas_exibir:
+        st.info("📝 Nenhuma turma cadastrada. Use o formulário acima para adicionar.")
+    
+    for turma in turmas_exibir:
+        with st.expander(f"🎒 {turma.nome} [{obter_grupo_seguro(turma)}]", expanded=False):
+            with st.form(f"edit_turma_{turma.id}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    novo_nome = st.text_input("Nome", turma.nome, key=f"nome_turma_{turma.id}")
+                    nova_serie = st.text_input("Série", turma.serie, key=f"serie_turma_{turma.id}")
+                with col2:
+                    st.text_input("Turno", "manha", disabled=True, key=f"turno_turma_{turma.id}")
+                    novo_grupo = st.selectbox(
+                        "Grupo", 
+                        ["A", "B"],
+                        index=0 if obter_grupo_seguro(turma) == "A" else 1,
+                        key=f"grupo_turma_{turma.id}"
+                    )
+                
+                # Mostrar informações da turma
+                segmento = obter_segmento_turma(turma.nome)
+                horarios = obter_horarios_turma(turma.nome)
+                st.write(f"**Segmento:** {segmento}")
+                st.write(f"**Horários disponíveis:** {len(horarios)} períodos")
+                
+                grupo_turma = obter_grupo_seguro(turma)
+                carga_atual = 0
+                disciplinas_turma = []
+                
+                # ✅ CORREÇÃO: Verificar disciplinas vinculadas DIRETAMENTE à turma
+                for disc in st.session_state.disciplinas:
+                    if turma.nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
+                        carga_atual += disc.carga_semanal
+                        disciplinas_turma.append(disc.nome)
+                
+                carga_maxima = calcular_carga_maxima(turma.serie)
+                st.write(f"**Carga horária atual:** {carga_atual}/{carga_maxima}h")
+                if disciplinas_turma:
+                    st.caption(f"Disciplinas do Grupo {grupo_turma}: {', '.join(disciplinas_turma)}")
+                else:
+                    st.caption("⚠️ Nenhuma disciplina do mesmo grupo atribuída")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("💾 Salvar Alterações"):
+                        if novo_nome and nova_serie:
+                            try:
+                                turma.nome = novo_nome
+                                turma.serie = nova_serie
+                                turma.grupo = novo_grupo
+                                
+                                if salvar_tudo():
+                                    st.success("✅ Turma atualizada!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Erro ao atualizar: {str(e)}")
+                        else:
+                            st.error("❌ Preencha todos os campos obrigatórios")
+                
+                with col2:
+                    if st.form_submit_button("🗑️ Excluir Turma", type="secondary"):
+                        try:
+                            st.session_state.turmas.remove(turma)
+                            if salvar_tudo():
+                                st.success("✅ Turma excluída!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Erro ao excluir: {str(e)}")
+
+with abas[4]:  # ABA SALAS
+    st.header("🏫 Salas")
+    
+    with st.expander("➕ Adicionar Nova Sala", expanded=False):
+        with st.form("add_sala"):
+            col1, col2 = st.columns(2)
+            with col1:
+                nome = st.text_input("Nome da Sala*")
+                capacidade = st.number_input("Capacidade*", 1, 100, 30)
+            with col2:
+                tipo = st.selectbox("Tipo*", ["normal", "laboratório", "auditório"])
+            
+            if st.form_submit_button("✅ Adicionar Sala"):
+                if nome:
+                    try:
+                        nova_sala = Sala(nome, capacidade, tipo)
+                        st.session_state.salas.append(nova_sala)
+                        if salvar_tudo():
+                            st.success(f"✅ Sala '{nome}' adicionada!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Erro ao adicionar sala: {str(e)}")
+                else:
+                    st.error("❌ Preencha todos os campos obrigatórios (*)")
+    
+    st.subheader("📋 Lista de Salas")
+    
+    if not st.session_state.salas:
+        st.info("📝 Nenhuma sala cadastrada. Use o formulário acima para adicionar.")
+    
+    for sala in st.session_state.salas:
+        with st.expander(f"🏫 {sala.nome}", expanded=False):
+            with st.form(f"edit_sala_{sala.id}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    novo_nome = st.text_input("Nome", sala.nome, key=f"nome_sala_{sala.id}")
+                    nova_capacidade = st.number_input("Capacidade", 1, 100, sala.capacidade, key=f"cap_sala_{sala.id}")
+                with col2:
+                    novo_tipo = st.selectbox(
+                        "Tipo", 
+                        ["normal", "laboratório", "auditório"],
+                        index=["normal", "laboratório", "auditório"].index(sala.tipo),
+                        key=f"tipo_sala_{sala.id}"
+                    )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("💾 Salvar Alterações"):
+                        if novo_nome:
+                            try:
+                                sala.nome = novo_nome
+                                sala.capacidade = nova_capacidade
+                                sala.tipo = novo_tipo
+                                
+                                if salvar_tudo():
+                                    st.success("✅ Sala atualizada!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Erro ao atualizar: {str(e)}")
+                        else:
+                            st.error("❌ Preencha todos os campos obrigatórios")
+                
+                with col2:
+                    if st.form_submit_button("🗑️ Excluir Sala", type="secondary"):
+                        try:
+                            st.session_state.salas.remove(sala)
+                            if salvar_tudo():
+                                st.success("✅ Sala excluída!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Erro ao excluir: {str(e)}")
+
+with abas[5]:  # ABA GERAR GRADE
+    st.header("🗓️ Gerar Grade Horária")
+    
+    st.subheader("🎯 Configurações da Grade")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        tipo_grade = st.selectbox(
+            "Tipo de Grade",
+            [
+                "Grade Completa - Todas as Turmas",
+                "Grade por Grupo A",
+                "Grade por Grupo B", 
+                "Grade por Turma Específica"
+            ]
+        )
         
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-header bg-success text-white">
-                    <h4><i class="fas fa-chart-pie"></i> Análise Detalhada de Custos</h4>
-                </div>
-                <div class="card-body">
-                    <div class="alert alert-success">
-                        <strong>Infraestrutura específica:</strong> Brinquedoteca, laboratórios, quadras
-                    </div>
-                    <div class="alert alert-info">
-                        <strong>Materiais por aluno:</strong> Kits de atividades, uniformes, livros
-                    </div>
-                    <div class="alert alert-warning">
-                        <strong>Recursos humanos:</strong> Professores especializados, capacitação
-                    </div>
-                    <div class="alert alert-primary">
-                        <strong>Marketing segmentado:</strong> Divulgação por público-alvo
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    '''
-    return get_base_html("Business Plan Escolar - Início", content)
+        if tipo_grade == "Grade por Turma Específica":
+            turmas_opcoes = [t.nome for t in st.session_state.turmas]
+            if turmas_opcoes:
+                turma_selecionada = st.selectbox("Selecionar Turma", turmas_opcoes)
+            else:
+                turma_selecionada = None
+    
+    with col2:
+        tipo_algoritmo = st.selectbox(
+            "Algoritmo de Geração",
+            ["Algoritmo Simples (Rápido)", "Google OR-Tools (Otimizado)"]
+        )
+        
+        # ✅ REMOVIDO: Dias EM até 13:10 - AGORA É SEMPRE
+        st.info("📅 **EM sempre até 13:10 (8 períodos)**")
+        st.info("📅 **EF II até 12:20 (6 períodos)**")
+    
+    st.subheader("📊 Pré-análise de Viabilidade")
+    
+    # Calcular carga horária conforme seleção
+    if tipo_grade == "Grade por Grupo A":
+        turmas_filtradas = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == "A"]
+        grupo_texto = "Grupo A"
+    elif tipo_grade == "Grade por Grupo B":
+        turmas_filtradas = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == "B"]
+        grupo_texto = "Grupo B"
+    elif tipo_grade == "Grade por Turma Específica" and turma_selecionada:
+        turmas_filtradas = [t for t in st.session_state.turmas if t.nome == turma_selecionada]
+        grupo_texto = f"Turma {turma_selecionada}"
+    else:
+        turmas_filtradas = st.session_state.turmas
+        grupo_texto = "Todas as Turmas"
+    
+    # Filtrar disciplinas pelo GRUPO CORRETO
+    if tipo_grade == "Grade por Grupo A":
+        disciplinas_filtradas = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == "A"]
+    elif tipo_grade == "Grade por Grupo B":
+        disciplinas_filtradas = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == "B"]
+    else:
+        disciplinas_filtradas = st.session_state.disciplinas
+    
+    # Calcular total de aulas necessárias
+    total_aulas = 0
+    aulas_por_turma = {}
+    problemas_carga = []
+    
+    for turma in turmas_filtradas:
+        aulas_turma = 0
+        grupo_turma = obter_grupo_seguro(turma)
+        
+        # ✅ CORREÇÃO: Contar aulas baseado no vínculo DIRETO turma-disciplina
+        for disc in disciplinas_filtradas:
+            disc_grupo = obter_grupo_seguro(disc)
+            # AGORA: Verifica se a disciplina está vinculada a ESTA turma específica
+            if turma.nome in disc.turmas and disc_grupo == grupo_turma:
+                aulas_turma += disc.carga_semanal
+                total_aulas += disc.carga_semanal
+        
+        aulas_por_turma[turma.nome] = aulas_turma
+        
+        carga_maxima = calcular_carga_maxima(turma.serie)
+        if aulas_turma > carga_maxima:
+            problemas_carga.append(f"{turma.nome} [{grupo_turma}]: {aulas_turma}h > {carga_maxima}h máximo")
+    
+    # ✅ CAPACIDADE COM HORÁRIOS REAIS
+    capacidade_total = 0
+    for turma in turmas_filtradas:
+        horarios_turma = obter_horarios_turma(turma.nome)
+        capacidade_total += len(DIAS_SEMANA) * len(horarios_turma)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Turmas", len(turmas_filtradas))
+    with col2:
+        st.metric("Aulas Necessárias", total_aulas)
+    with col3:
+        st.metric("Capacidade Disponível", capacidade_total)
+    
+    if problemas_carga:
+        st.error("❌ Problemas de carga horária detectados:")
+        for problema in problemas_carga:
+            st.write(f"- {problema}")
+    
+    if total_aulas == 0:
+        st.error("❌ Nenhuma aula para alocar! Verifique se as disciplinas estão vinculadas às turmas corretas.")
+    elif total_aulas > capacidade_total:
+        st.error("❌ Capacidade insuficiente! Reduza a carga horária.")
+    elif problemas_carga:
+        st.error("❌ Corrija os problemas de carga horária antes de gerar a grade!")
+    else:
+        st.success("✅ Capacidade suficiente para gerar grade!")
+        
+        if st.button("🚀 Gerar Grade Horária", type="primary", use_container_width=True):
+            if not turmas_filtradas:
+                st.error("❌ Nenhuma turma selecionada para gerar grade!")
+            elif not disciplinas_filtradas:
+                st.error("❌ Nenhuma disciplina disponível para as turmas selecionadas!")
+            elif problemas_carga:
+                st.error("❌ Corrija os problemas de carga horária antes de gerar!")
+            else:
+                with st.spinner(f"Gerando grade para {grupo_texto}..."):
+                    try:
+                        if tipo_grade == "Grade por Grupo A":
+                            professores_filtrados = [p for p in st.session_state.professores 
+                                                   if obter_grupo_seguro(p) in ["A", "AMBOS"]]
+                        elif tipo_grade == "Grade por Grupo B":
+                            professores_filtrados = [p for p in st.session_state.professores 
+                                                   if obter_grupo_seguro(p) in ["B", "AMBOS"]]
+                        else:
+                            professores_filtrados = st.session_state.professores
+                        
+                        # ✅ REMOVIDO: dias_em_estendido - AGORA É SEMPRE
+                        if tipo_algoritmo == "Google OR-Tools (Otimizado)":
+                            try:
+                                grade = GradeHorariaORTools(
+                                    turmas_filtradas,
+                                    professores_filtrados,
+                                    disciplinas_filtradas,
+                                    dias_em_estendido=DIAS_SEMANA  # ✅ SEMPRE TODOS OS DIAS
+                                )
+                                aulas = grade.resolver()
+                                metodo = "Google OR-Tools"
+                            except Exception as e:
+                                st.warning(f"⚠️ OR-Tools falhou: {str(e)}. Usando algoritmo simples...")
+                                simple_grade = SimpleGradeHoraria(
+                                    turmas=turmas_filtradas,
+                                    professores=professores_filtrados,
+                                    disciplinas=disciplinas_filtradas,
+                                    salas=st.session_state.salas,
+                                    dias_em_estendido=DIAS_SEMANA  # ✅ SEMPRE TODOS OS DIAS
+                                )
+                                aulas = simple_grade.gerar_grade()
+                                metodo = "Algoritmo Simples (fallback)"
+                        else:
+                            simple_grade = SimpleGradeHoraria(
+                                turmas=turmas_filtradas,
+                                professores=professores_filtrados,
+                                disciplinas=disciplinas_filtradas,
+                                salas=st.session_state.salas,
+                                dias_em_estendido=DIAS_SEMANA  # ✅ SEMPRE TODOS OS DIAS
+                            )
+                            aulas = simple_grade.gerar_grade()
+                            metodo = "Algoritmo Simples"
+                        
+                        if tipo_grade == "Grade por Turma Específica" and turma_selecionada:
+                            aulas = [a for a in aulas if a.turma == turma_selecionada]
+                        
+                        st.session_state.aulas = aulas
+                        if salvar_tudo():
+                            st.success(f"✅ Grade {grupo_texto} gerada com {metodo}! ({len(aulas)} aulas)")
+                        
+                        if aulas:
+                            # ✅ NOVA VISUALIZAÇÃO: Grade em formato de calendário
+                            st.subheader("📅 Visualização da Grade Horária - Formato Calendário")
+                            
+                            # Criar grades para cada turma
+                            turmas_com_aulas = list(set(a.turma for a in aulas))
+                            
+                            for turma_nome in turmas_com_aulas:
+                                st.write(f"#### 🎒 Grade da Turma: {turma_nome}")
+                                
+                                # Filtrar aulas da turma
+                                aulas_turma = [a for a in aulas if a.turma == turma_nome]
+                                
+                                # Criar matriz da grade
+                                dias_ordenados = ["segunda", "terca", "quarta", "quinta", "sexta"]
+                                segmento = obter_segmento_turma(turma_nome)
+                                horarios_disponiveis = obter_horarios_turma(turma_nome)
+                                
+                                # Criar grade visual
+                                st.markdown("""
+                                <style>
+                                .grade-table {
+                                    width: 100%;
+                                    border-collapse: collapse;
+                                }
+                                .grade-table th, .grade-table td {
+                                    border: 1px solid #ddd;
+                                    padding: 8px;
+                                    text-align: center;
+                                }
+                                .grade-table th {
+                                    background-color: #f2f2f2;
+                                    font-weight: bold;
+                                }
+                                .horario-livre {
+                                    background-color: #f8f9fa;
+                                    color: #6c757d;
+                                }
+                                .horario-aula {
+                                    background-color: #d1ecf1;
+                                    color: #0c5460;
+                                }
+                                .horario-intervalo {
+                                    background-color: #fff3cd;
+                                    color: #856404;
+                                    font-weight: bold;
+                                }
+                                </style>
+                                """, unsafe_allow_html=True)
+                                
+                                # Criar tabela HTML
+                                table_html = """
+                                <table class='grade-table'>
+                                    <tr>
+                                        <th>Horário</th>
+                                        <th>Segunda</th>
+                                        <th>Terça</th>
+                                        <th>Quarta</th>
+                                        <th>Quinta</th>
+                                        <th>Sexta</th>
+                                    </tr>
+                                """
+                                
+                                # Para EF II: mostrar horários 1-6
+                                # Para EM: mostrar horários 1-8
+                                max_horario = 6 if segmento == "EF_II" else 8
+                                
+                                for horario in range(1, max_horario + 1):
+                                    horario_real = obter_horario_real(turma_nome, horario)
+                                    table_html += f"<tr><td><strong>{horario_real}</strong></td>"
+                                    
+                                    for dia in dias_ordenados:
+                                        # Encontrar aula neste horário e dia
+                                        aula_no_slot = next((a for a in aulas_turma if a.dia == dia and a.horario == horario), None)
+                                        
+                                        # Verificar se é horário de intervalo
+                                        if segmento == "EF_II" and horario == 3:  # EF II: intervalo no horário 3
+                                            table_html += "<td class='horario-intervalo'>🕛 INTERVALO</td>"
+                                        elif segmento == "EM" and horario == 4:  # EM: intervalo no horário 4
+                                            table_html += "<td class='horario-intervalo'>🕛 INTERVALO</td>"
+                                        elif aula_no_slot:
+                                            table_html += f"<td class='horario-aula'>{aula_no_slot.disciplina}<br><small>{aula_no_slot.professor}</small></td>"
+                                        else:
+                                            # Verificar se é horário válido para esta turma
+                                            if horario in horarios_disponiveis:
+                                                table_html += "<td class='horario-livre'>LIVRE</td>"
+                                            else:
+                                                table_html += "<td></td>"
+                                    
+                                    table_html += "</tr>"
+                                
+                                table_html += "</table>"
+                                st.markdown(table_html, unsafe_allow_html=True)
+                                
+                                # Informações da turma
+                                st.caption(f"Segmento: {segmento} | Horários: {len(horarios_disponiveis)} períodos")
+                                
+                                # Legenda
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.markdown("🟦 **Aula Normal**")
+                                with col2:
+                                    st.markdown("🟨 **Intervalo**")
+                                with col3:
+                                    st.markdown("⬜ **Horário Livre**")
+                                
+                                st.markdown("---")
+                            
+                            # Dataframe original (mantido para compatibilidade)
+                            df_aulas = pd.DataFrame([
+                                {
+                                    "Turma": a.turma,
+                                    "Disciplina": a.disciplina, 
+                                    "Professor": a.professor,
+                                    "Dia": a.dia,
+                                    "Horário": f"{a.horario}º ({obter_horario_real(a.turma, a.horario)})",
+                                    "Sala": a.sala,
+                                    "Grupo": a.grupo
+                                }
+                                for a in aulas
+                            ])
+                            
+                            df_aulas = df_aulas.sort_values(["Turma", "Dia", "Horário"])
+                            st.subheader("📊 Lista Detalhada das Aulas")
+                            st.dataframe(df_aulas, use_container_width=True)
+                            
+                            # Download Excel com tratamento de erro
+                            try:
+                                output = io.BytesIO()
+                                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                    df_aulas.to_excel(writer, sheet_name="Grade_Completa", index=False)
+                                    
+                                    # Adicionar estatísticas
+                                    stats_data = {
+                                        "Estatística": [
+                                            "Total de Aulas", 
+                                            "Professores Utilizados", 
+                                            "Turmas com Aula", 
+                                            "Método",
+                                            "Horário EM"
+                                        ],
+                                        "Valor": [
+                                            len(aulas), 
+                                            len(set(a.professor for a in aulas)), 
+                                            len(set(a.turma for a in aulas)), 
+                                            metodo,
+                                            "07:00 - 13:10 (todos os dias)"
+                                        ]
+                                    }
+                                    stats_df = pd.DataFrame(stats_data)
+                                    stats_df.to_excel(writer, sheet_name="Estatísticas", index=False)
+                                
+                                st.download_button(
+                                    "📥 Baixar Grade em Excel",
+                                    output.getvalue(),
+                                    f"grade_{grupo_texto.replace(' ', '_')}.xlsx",
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                )
+                            except ImportError:
+                                st.warning("⚠️ Módulo 'openpyxl' não instalado. Para exportar para Excel, instale: pip install openpyxl")
+                                
+                                # Oferecer alternativa CSV
+                                csv = df_aulas.to_csv(index=False)
+                                st.download_button(
+                                    "📥 Baixar Grade em CSV",
+                                    csv,
+                                    f"grade_{grupo_texto.replace(' ', '_')}.csv",
+                                    "text/csv"
+                                )
+                        else:
+                            st.warning("⚠️ Nenhuma aula foi gerada.")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Erro ao gerar grade: {str(e)}")
+                        st.code(traceback.format_exc())
 
-@app.route('/simulacao')
-def simulacao():
-    # Gerar opções de atividades por nível
-    atividades_options = ""
-    for nivel, config in CUSTOS_POR_NIVEL.items():
-        atividades_options += f'<optgroup label="{nivel.replace("_", " ").title()}">'
-        for atividade in config['atividades_especificas']:
-            atividades_options += f'<option value="{atividade}">{atividade}</option>'
-        atividades_options += '</optgroup>'
+with abas[6]:  # NOVA ABA: GRADE POR PROFESSOR
+    st.header("👨‍🏫 Grade Horária por Professor")
     
-    # Gerar opções de infraestrutura
-    infra_options = ""
-    for item in CATEGORIAS_CUSTOS['infraestrutura']['itens']:
-        infra_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'infra')">
-            <input class="form-check-input" type="checkbox" name="infra_itens" value="{item['nome']}" id="infra_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="infra_{item['nome'].replace(' ', '_')}">
-                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}
-                <small class="d-block text-muted">{item.get('descricao', '')}</small>
-            </label>
-        </div>
-        '''
+    if not st.session_state.get('aulas'):
+        st.info("ℹ️ Gere uma grade horária primeiro na aba 'Gerar Grade' para visualizar as grades por professor.")
+    else:
+        # Filtros
+        col1, col2 = st.columns(2)
+        with col1:
+            professor_selecionado = st.selectbox(
+                "Selecionar Professor",
+                options=list(sorted(set(a.professor for a in st.session_state.aulas))),
+                key="filtro_professor_grade"
+            )
+        
+        with col2:
+            formato_exibicao = st.radio(
+                "Formato de Exibição",
+                ["Visual Semanal", "Lista Detalhada"],
+                horizontal=True
+            )
+        
+        if professor_selecionado:
+            # Filtrar aulas do professor selecionado
+            aulas_professor = [a for a in st.session_state.aulas if a.professor == professor_selecionado]
+            
+            if not aulas_professor:
+                st.warning(f"ℹ️ O professor {professor_selecionado} não tem aulas alocadas na grade atual.")
+            else:
+                st.success(f"📊 Professor {professor_selecionado}: {len(aulas_professor)} aulas na semana")
+                
+                if formato_exibicao == "Visual Semanal":
+                    # Grade semanal do professor
+                    st.subheader(f"📅 Grade Semanal - Prof. {professor_selecionado}")
+                    
+                    # Criar matriz da grade do professor
+                    dias_ordenados = ["segunda", "terca", "quarta", "quinta", "sexta"]
+                    horarios_ordenados = list(range(1, 9))  # Todos os horários possíveis (1-8 para cobrir EM)
+                    
+                    # Criar grade visual
+                    st.markdown("""
+                    <style>
+                    .grade-professor-table {
+                        width: 100%;
+                        border-collapse: collapse;
+                        font-size: 14px;
+                    }
+                    .grade-professor-table th, .grade-professor-table td {
+                        border: 1px solid #ddd;
+                        padding: 10px;
+                        text-align: center;
+                        vertical-align: top;
+                    }
+                    .grade-professor-table th {
+                        background-color: #4A90E2;
+                        color: white;
+                        font-weight: bold;
+                    }
+                    .horario-prof-livre {
+                        background-color: #f8f9fa;
+                        color: #6c757d;
+                        font-style: italic;
+                    }
+                    .horario-prof-aula {
+                        background-color: #d1ecf1;
+                        color: #0c5460;
+                        border-left: 4px solid #0c5460;
+                    }
+                    .horario-prof-indisponivel {
+                        background-color: #ffe6e6;
+                        color: #dc3545;
+                        font-style: italic;
+                    }
+                    .info-turma {
+                        font-weight: bold;
+                        font-size: 12px;
+                    }
+                    .info-disciplina {
+                        font-size: 11px;
+                    }
+                    .info-sala {
+                        font-size: 10px;
+                        color: #666;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+                    
+                    # Obter informações do professor
+                    professor_info = next((p for p in st.session_state.professores if p.nome == professor_selecionado), None)
+                    
+                    # Criar tabela HTML
+                    table_html = """
+                    <table class='grade-professor-table'>
+                        <tr>
+                            <th>Horário</th>
+                            <th>Segunda</th>
+                            <th>Terça</th>
+                            <th>Quarta</th>
+                            <th>Quinta</th>
+                            <th>Sexta</th>
+                        </tr>
+                    """
+                    
+                    for horario in horarios_ordenados:
+                        horario_texto = "07:00 - 07:50" if horario == 1 else \
+                                       "07:50 - 08:40" if horario == 2 else \
+                                       "08:40 - 09:30" if horario == 3 else \
+                                       "09:30 - 09:50 (Intervalo)" if horario == 4 else \
+                                       "09:50 - 10:40" if horario == 5 else \
+                                       "10:40 - 11:30" if horario == 6 else \
+                                       "11:30 - 12:20" if horario == 7 else \
+                                       "12:20 - 13:10" if horario == 8 else f"Horário {horario}"
+                        
+                        table_html += f"<tr><td><strong>{horario_texto}</strong></td>"
+                        
+                        for dia in dias_ordenados:
+                            # Encontrar aula neste horário e dia para este professor
+                            aula_no_slot = next((a for a in aulas_professor if a.dia == dia and a.horario == horario), None)
+                            
+                            # Verificar se o professor está indisponível neste horário
+                            professor_indisponivel = False
+                            if professor_info and hasattr(professor_info, 'horarios_indisponiveis'):
+                                professor_indisponivel = f"{dia}_{horario}" in professor_info.horarios_indisponiveis
+                            
+                            if professor_indisponivel:
+                                table_html += "<td class='horario-prof-indisponivel'>❌ INDISPONÍVEL</td>"
+                            elif aula_no_slot:
+                                # Formatar informações da aula
+                                table_html += f"""
+                                <td class='horario-prof-aula'>
+                                    <div class='info-turma'>{aula_no_slot.turma}</div>
+                                    <div class='info-disciplina'>{aula_no_slot.disciplina}</div>
+                                    <div class='info-sala'>{aula_no_slot.sala}</div>
+                                </td>
+                                """
+                            else:
+                                table_html += "<td class='horario-prof-livre'>LIVRE</td>"
+                        
+                        table_html += "</tr>"
+                    
+                    table_html += "</table>"
+                    st.markdown(table_html, unsafe_allow_html=True)
+                    
+                    # Estatísticas do professor
+                    st.subheader("📈 Estatísticas do Professor")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        total_aulas = len(aulas_professor)
+                        st.metric("Total de Aulas", total_aulas)
+                    
+                    with col2:
+                        turmas_ministradas = len(set(a.turma for a in aulas_professor))
+                        st.metric("Turmas", turmas_ministradas)
+                    
+                    with col3:
+                        disciplinas_ministradas = len(set(a.disciplina for a in aulas_professor))
+                        st.metric("Disciplinas", disciplinas_ministradas)
+                    
+                    with col4:
+                        # Calcular horas semanais
+                        horas_totais = total_aulas * 50 / 60  # 50 minutos por aula
+                        st.metric("Horas/Semana", f"{horas_totais:.1f}h")
+                    
+                    # Detalhamento por dia
+                    st.subheader("📅 Distribuição por Dia")
+                    dias_distribuicao = {}
+                    for dia in dias_ordenados:
+                        aulas_dia = [a for a in aulas_professor if a.dia == dia]
+                        dias_distribuicao[dia] = len(aulas_dia)
+                    
+                    # Gráfico de barras simples
+                    chart_data = {
+                        'Dia': [d.capitalize() for d in dias_ordenados],
+                        'Aulas': [dias_distribuicao[dia] for dia in dias_ordenados]
+                    }
+                    st.bar_chart(chart_data, x='Dia', y='Aulas')
+                    
+                else:  # Lista Detalhada
+                    st.subheader(f"📋 Lista Detalhada - Prof. {professor_selecionado}")
+                    
+                    # Criar dataframe detalhado
+                    df_detalhado = pd.DataFrame([
+                        {
+                            "Dia": a.dia.capitalize(),
+                            "Horário": f"{a.horario}º ({obter_horario_real(a.turma, a.horario)})",
+                            "Turma": a.turma,
+                            "Disciplina": a.disciplina,
+                            "Sala": a.sala,
+                            "Grupo": a.grupo
+                        }
+                        for a in aulas_professor
+                    ])
+                    
+                    # Ordenar por dia e horário
+                    ordem_dias = {"Segunda": 1, "Terca": 2, "Quarta": 3, "Quinta": 4, "Sexta": 5}
+                    df_detalhado['Ordem'] = df_detalhado['Dia'].map(ordem_dias)
+                    df_detalhado = df_detalhado.sort_values(['Ordem', 'Horário']).drop('Ordem', axis=1)
+                    
+                    st.dataframe(df_detalhado, use_container_width=True)
+        
+        # Visualização de todos os professores
+        st.markdown("---")
+        st.subheader("👥 Visão Geral de Todos os Professores")
+        
+        # Estatísticas gerais
+        professores_com_aulas = list(set(a.professor for a in st.session_state.aulas))
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Professores com Aulas", len(professores_com_aulas))
+        with col2:
+            st.metric("Total de Professores", len(st.session_state.professores))
+        with col3:
+            st.metric("Taxa de Utilização", f"{(len(professores_com_aulas) / len(st.session_state.professores)) * 100:.1f}%")
+        
+        # Tabela resumo dos professores
+        st.subheader("📊 Resumo por Professor")
+        
+        resumo_professores = []
+        for professor in st.session_state.professores:
+            aulas_prof = [a for a in st.session_state.aulas if a.professor == professor.nome]
+            total_aulas_prof = len(aulas_prof)
+            turmas_prof = len(set(a.turma for a in aulas_prof))
+            disciplinas_prof = len(set(a.disciplina for a in aulas_prof))
+            horas_prof = total_aulas_prof * 50 / 60
+            
+            resumo_professores.append({
+                "Professor": professor.nome,
+                "Aulas": total_aulas_prof,
+                "Horas": f"{horas_prof:.1f}h",
+                "Turmas": turmas_prof,
+                "Disciplinas": disciplinas_prof,
+                "Grupo": professor.grupo,
+                "Status": "✅ Com Aulas" if total_aulas_prof > 0 else "⚠️ Sem Aulas"
+            })
+        
+        df_resumo = pd.DataFrame(resumo_professores)
+        df_resumo = df_resumo.sort_values("Aulas", ascending=False)
+        
+        st.dataframe(df_resumo, use_container_width=True)
+        
+        # Download da grade completa dos professores
+        st.subheader("📥 Exportar Dados")
+        
+        try:
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Sheet com resumo
+                df_resumo.to_excel(writer, sheet_name="Resumo_Professores", index=False)
+                
+                # Sheet com grade detalhada de cada professor
+                for professor in professores_com_aulas:
+                    aulas_prof = [a for a in st.session_state.aulas if a.professor == professor]
+                    df_prof = pd.DataFrame([
+                        {
+                            "Dia": a.dia.capitalize(),
+                            "Horário": f"{a.horario}º",
+                            "Período": obter_horario_real(a.turma, a.horario),
+                            "Turma": a.turma,
+                            "Disciplina": a.disciplina,
+                            "Sala": a.sala,
+                            "Grupo": a.grupo
+                        }
+                        for a in aulas_prof
+                    ])
+                    
+                    # Ordenar
+                    ordem_dias = {"Segunda": 1, "Terca": 2, "Quarta": 3, "Quinta": 4, "Sexta": 5}
+                    df_prof['Ordem'] = df_prof['Dia'].map(ordem_dias)
+                    df_prof = df_prof.sort_values(['Ordem', 'Horário']).drop('Ordem', axis=1)
+                    
+                    df_prof.to_excel(writer, sheet_name=professor[:31], index=False)
+            
+            st.download_button(
+                "📥 Baixar Grade Completa dos Professores",
+                output.getvalue(),
+                "grade_professores_completa.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except ImportError:
+            st.warning("⚠️ Módulo 'openpyxl' não instalado. Para exportar para Excel, instale: pip install openpyxl")
+            
+            # Oferecer alternativa CSV
+            csv_resumo = df_resumo.to_csv(index=False)
+            st.download_button(
+                "📥 Baixar Resumo dos Professores em CSV",
+                csv_resumo,
+                "resumo_professores.csv",
+                "text/csv"
+            )
     
-    # Gerar opções de material
-    material_options = ""
-    for item in CATEGORIAS_CUSTOS['material']['itens']:
-        por_aluno = " (por aluno)" if item.get('por_aluno', False) else ""
-        material_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'material')">
-            <input class="form-check-input" type="checkbox" name="material_itens" value="{item['nome']}" id="material_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="material_{item['nome'].replace(' ', '_')}">
-                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}{por_aluno}
-            </label>
-        </div>
-        '''
-    
-    # Gerar opções de marketing
-    marketing_options = ""
-    for item in CATEGORIAS_CUSTOS['marketing']['itens']:
-        marketing_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'marketing')">
-            <input class="form-check-input" type="checkbox" name="marketing_itens" value="{item['nome']}" id="marketing_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="marketing_{item['nome'].replace(' ', '_')}">
-                <strong>{
+# Sidebar
+st.sidebar.title("⚙️ Configurações")
+if st.sidebar.button("🔄 Resetar Banco de Dados"):
+    try:
+        database.resetar_banco()
+        st.sidebar.success("✅ Banco resetado! Recarregue a página.")
+    except Exception as e:
+        st.sidebar.error(f"❌ Erro ao resetar: {str(e)}")
+
+st.sidebar.write("### Status do Sistema:")
+st.sidebar.write(f"**Turmas:** {len(st.session_state.turmas)}")
+st.sidebar.write(f"**Professores:** {len(st.session_state.professores)}")
+st.sidebar.write(f"**Disciplinas:** {len(st.session_state.disciplinas)}")
+st.sidebar.write(f"**Salas:** {len(st.session_state.salas)}")
+st.sidebar.write(f"**Aulas na Grade:** {len(st.session_state.get('aulas', []))}")
+
+st.sidebar.write("### 💡 Informações dos Horários:")
+st.sidebar.write("**EF II:** 07:50-12:20")
+st.sidebar.write("- 6 períodos + intervalo")
+st.sidebar.write("**EM:** 07:00-13:10")
+st.sidebar.write("- 8 períodos + intervalo")
+
+st.sidebar.write("### 🕒 Horários Reais:")
+st.sidebar.write("**EM:**")
+st.sidebar.write("1º: 07:00-07:50")
+st.sidebar.write("2º: 07:50-08:40")
+st.sidebar.write("3º: 08:40-09:30")
+st.sidebar.write("4º: 09:30-09:50 (Intervalo)")
+st.sidebar.write("5º: 09:50-10:40")
+st.sidebar.write("6º: 10:40-11:30")
+st.sidebar.write("7º: 11:30-12:20")
+st.sidebar.write("8º: 12:20-13:10")
+
+st.sidebar.write("**EF II:**")
+st.sidebar.write("1º: 07:50-08:40")
+st.sidebar.write("2º: 08:40-09:30")
+st.sidebar.write("3º: 09:30-09:50 (Intervalo)")
+st.sidebar.write("4º: 09:50-10:40")
+st.sidebar.write("5º: 10:40-11:30")
+st.sidebar.write("6º: 11:30-12:20")
