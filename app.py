@@ -163,21 +163,32 @@ with abas[0]:  # ABA INÍCIO
         st.write("**Ensino Fundamental II**")
         st.write(f"Turmas: {len(turmas_efii)}")
         st.write(f"Horário: 07:50 - 12:20")
-        st.write(f"Períodos: 6 aulas + intervalo")
+        st.write(f"Períodos: 5 aulas + intervalo")
         
     with col2:
         st.write("**Ensino Médio**")
         st.write(f"Turmas: {len(turmas_em)}")
         st.write(f"Horário: 07:00 - 13:10")
-        st.write(f"Períodos: 8 aulas + intervalo")
+        st.write(f"Períodos: 7 aulas + intervalo")
     
     # Verificação de carga horária
-    st.subheader("📈 Verificação de Carga Horária")
-    for turma in st.session_state.turmas:
-        carga_total = 0
-        disciplinas_turma = []
-        grupo_turma = obter_grupo_seguro(turma)
-        segmento = obter_segmento_turma(turma.nome)
+    #st.subheader("📈 Verificação de Carga Horária")
+    #for turma in st.session_state.turmas:
+     #   carga_total = 0
+      #  disciplinas_turma = []
+       # grupo_turma = obter_grupo_seguro(turma)
+        #segmento = obter_segmento_turma(turma.nome)
+        
+        # Função para calcular carga horária máxima por série
+    def calcular_carga_maxima(serie):
+    """Calcula a quantidade MÁXIMA de aulas semanais baseada na série"""
+    if 'em' in serie.lower() or 'medio' in serie.lower() or serie in ['1em', '2em', '3em']:
+        return 35  # EM: máximo de 35 aulas por semana (7 aulas × 5 dias)
+    else:
+        return 25  # EF II: máximo de 25 aulas por semana (5 aulas × 5 dias)
+        
+        
+        
         
         # ✅ CORREÇÃO: Verificar disciplinas vinculadas DIRETAMENTE à turma
         for disc in st.session_state.disciplinas:
