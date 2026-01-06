@@ -1,10 +1,3 @@
-Gosto mais do Layout original, com abas e sidebar com algnus botoes e informação, todo original. |As Grades tem que ser as originais, e nome do Professor em branco
-
-Como voltamos a ter que recomeçar, esse link tem o historico, nos ultimos momentos chegamos quase ao final.  E o codigo é do app.py arquivo principal.
-
-https://chat.deepseek.com/share/yb1q5fqj4oo5mcimx9
-
-
 import streamlit as st
 import pandas as pd
 from datetime import time
@@ -1895,3 +1888,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
