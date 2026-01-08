@@ -1,1829 +1,2137 @@
-import streamlit as st
-import pandas as pd
-from datetime import time
+from flask import Flask, render_template_string, request, jsonify, session, redirect
+from datetime import datetime
 import json
-from dataclasses import dataclass, asdict, field
-from typing import List, Optional, Dict, Tuple, Set
-from enum import Enum
-import random
+import math
+import os
+import sqlite3
 
-# ============================================
-# CONSTANTES E CONFIGURAÇÕES
-# ============================================
+app = Flask(__name__)
 
-DIAS_SEMANA = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta"]
+# Configuração para produção
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'business_plan_escolar_prod_2024_seguro')
+app.config['TEMPLATES_AUTO_RELOAD'] = os.environ.get('FLASK_ENV') == 'development'
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 31536000
 
-# HORÁRIOS CORRIGIDOS - 50 MINUTOS CADA
-HORARIOS_EM = [
-    ("07:00", "07:50"), ("07:50", "08:40"), ("08:40", "09:30"),
-    ("09:50", "10:40"), ("10:40", "11:30"), ("11:30", "12:20"),
-    ("12:20", "13:10")  # 7 períodos no total
-]
+# Configuração do banco de dados
+basedir = os.path.abspath(os.path.dirname(__file__))
+DATABASE = os.path.join(basedir, 'data', 'database.db')
 
-HORARIOS_EF_II = [
-    ("07:50", "08:40"), ("08:40", "09:30"), ("09:30", "10:20"),
-    ("10:40", "11:30"), ("11:30", "12:20"), ("12:20", "13:10"),
-    ("13:10", "14:00")  # 7 períodos no total
-]
+# Dados padrão para custos por nível escolar
+CUSTOS_POR_NIVEL = {
+    'infantil': {
+        'custo_professor_por_hora': 45,
+        'material_mensal_por_aluno': 80,
+        'atividades_especificas': ['Música', 'Artes', 'Psicomotricidade', 'Contação de Histórias'],
+        'infraestrutura_especifica': ['Brinquedoteca', 'Parque infantil', 'Sala multiuso'],
+        'ratio_professor_aluno': 10  # 1 professor para cada 10 alunos
+    },
+    'fundamental_i': {
+        'custo_professor_por_hora': 50,
+        'material_mensal_por_aluno': 60,
+        'atividades_especificas': ['Robótica', 'Programação', 'Teatro', 'Esportes', 'Inglês'],
+        'infraestrutura_especifica': ['Laboratório de informática', 'Quadra poliesportiva', 'Biblioteca'],
+        'ratio_professor_aluno': 15
+    },
+    'fundamental_ii': {
+        'custo_professor_por_hora': 55,
+        'material_mensal_por_aluno': 70,
+        'atividades_especificas': ['Robótica Avançada', 'Olimpíadas Científicas', 'Debate', 'Música Instrumental', 'Esportes Competitivos'],
+        'infraestrutura_especifica': ['Laboratório de ciências', 'Estúdio de música', 'Sala de estudos'],
+        'ratio_professor_aluno': 20
+    },
+    'medio': {
+        'custo_professor_por_hora': 65,
+        'material_mensal_por_aluno': 90,
+        'atividades_especificas': ['Preparatório ENEM', 'Orientação Profissional', 'Projetos Científicos', 'Debates Filosóficos', 'Empreendedorismo'],
+        'infraestrutura_especifica': ['Laboratório avançado', 'Sala de projeção', 'Espaço coworking'],
+        'ratio_professor_aluno': 25
+    }
+}
 
-@dataclass
-class Professor:
-    id: int
-    nome: str
-    grupo: str = "AMBOS"
-    disciplinas: Dict[str, int] = field(default_factory=dict)  # {nome_disciplina: horas_disponiveis}
-    max_aulas_dia: int = 5
-    min_aulas_dia: int = 0
-    disponibilidade: Dict[str, List[str]] = field(default_factory=dict)
-    
-    def to_dict(self):
-        return asdict(self)
-    
-    def get_horas_disponiveis(self, disciplina: str) -> int:
-        """Retorna horas disponíveis para uma disciplina específica"""
-        return self.disciplinas.get(disciplina, 0)
-    
-    def get_total_horas_disponiveis(self) -> int:
-        """Retorna total de horas disponíveis do professor"""
-        return sum(self.disciplinas.values())
-    
-    def get_disciplinas_list(self) -> List[str]:
-        """Retorna lista de disciplinas que o professor pode ministrar"""
-        return list(self.disciplinas.keys())
+# Categorias detalhadas de custos
+CATEGORIAS_CUSTOS = {
+    'infraestrutura': {
+        'itens': [
+            {'nome': 'Reforma de salas', 'custo_base': 5000, 'descricao': 'Adaptação para atividades específicas'},
+            {'nome': 'Equipamentos tecnológicos', 'custo_base': 15000, 'descricao': 'Computadores, tablets, projetores'},
+            {'nome': 'Materiais esportivos', 'custo_base': 3000, 'descricao': 'Bolas, redes, equipamentos'},
+            {'nome': 'Instrumentos musicais', 'custo_base': 8000, 'descricao': 'Violões, teclados, percussão'},
+            {'nome': 'Mobiliário especializado', 'custo_base': 7000, 'descricao': 'Mesas, cadeiras, armários'},
+            {'nome': 'Kit robótica/programação', 'custo_base': 12000, 'descricao': 'Kits Arduino, impressora 3D'}
+        ]
+    },
+    'material': {
+        'itens': [
+            {'nome': 'Material didático', 'custo_base': 2000, 'por_aluno': True},
+            {'nome': 'Kits de atividades', 'custo_base': 1500, 'por_aluno': True},
+            {'nome': 'Uniformes', 'custo_base': 3000, 'por_aluno': True},
+            {'nome': 'Material de consumo', 'custo_base': 1000, 'descricao': 'Papel, tinta, etc'},
+            {'nome': 'Livros paradidáticos', 'custo_base': 4000, 'por_aluno': True}
+        ]
+    },
+    'marketing': {
+        'itens': [
+            {'nome': 'Site e redes sociais', 'custo_base': 3000, 'descricao': 'Desenvolvimento e manutenção'},
+            {'nome': 'Material impresso', 'custo_base': 1500, 'descricao': 'Folhetos, banners, cartazes'},
+            {'nome': 'Eventos de divulgação', 'custo_base': 5000, 'descricao': 'Open school, workshops'},
+            {'nome': 'Publicidade online', 'custo_base': 4000, 'descricao': 'Google Ads, redes sociais'},
+            {'nome': 'Produção de vídeos', 'custo_base': 6000, 'descricao': 'Vídeos institucionais'}
+        ]
+    },
+    'recursos_humanos': {
+        'itens': [
+            {'nome': 'Capacitação de professores', 'custo_base': 8000, 'descricao': 'Cursos e workshops'},
+            {'nome': 'Contratação especialistas', 'custo_base': 15000, 'descricao': 'Professores específicos'},
+            {'nome': 'Equipe de apoio', 'custo_base': 6000, 'descricao': 'Coordenadores, monitores'},
+            {'nome': 'Benefícios e encargos', 'custo_base': 10000, 'descricao': 'VT, VR, saúde'}
+        ]
+    }
+}
 
-@dataclass
-class Disciplina:
-    id: int
-    nome: str
-    grupo: str = "AMBOS"
-    turmas: List[str] = field(default_factory=list)
-    carga_semanal: int = 0  # Em aulas de 50 minutos
-    professores: List[str] = field(default_factory=list)
-    
-    def to_dict(self):
-        return asdict(self)
-    
-    def get_carga_total_necessaria(self) -> int:
-        """Calcula carga horária total necessária considerando todas as turmas"""
-        return self.carga_semanal * len(self.turmas)
+def init_db():
+    """Inicializa o banco de dados SQLite"""
+    try:
+        data_dir = os.path.join(basedir, 'data')
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir, exist_ok=True)
+        
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS simulacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT,
+            data_criacao TEXT,
+            alunos_atuais INTEGER,
+            mensalidade_media REAL,
+            aumento_esperado REAL,
+            novos_alunos INTEGER,
+            nivel_escolar TEXT,
+            atividades_selecionadas TEXT,
+            custos_detalhados TEXT,
+            receita_mensal_atual REAL,
+            receita_projetada REAL,
+            investimento_total REAL,
+            retorno_mensal REAL,
+            payback REAL,
+            roi REAL,
+            dados TEXT
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        print("✅ Banco de dados inicializado com sucesso!")
+        return True
+    except Exception as e:
+        print(f"❌ Erro ao inicializar banco de dados: {e}")
+        return False
 
-@dataclass
-class Turma:
-    id: int
-    nome: str
-    serie: str
-    grupo: str = "AMBOS"
-    turno: str = "MANHÃ"
-    
-    def to_dict(self):
-        return asdict(self)
+def salvar_simulacao(dados_entrada, resultados, custos_detalhados):
+    """Salva uma simulação no banco de dados"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO simulacoes (
+            nome, data_criacao, alunos_atuais, mensalidade_media,
+            aumento_esperado, novos_alunos, nivel_escolar,
+            atividades_selecionadas, custos_detalhados,
+            receita_mensal_atual, receita_projetada, investimento_total,
+            retorno_mensal, payback, roi, dados
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            f"Simulação {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            dados_entrada.get('alunos_atuais', 0),
+            dados_entrada.get('mensalidade_media', 0),
+            dados_entrada.get('aumento_esperado', 0),
+            resultados.get('novos_alunos', 0),
+            dados_entrada.get('nivel_escolar', 'fundamental_i'),
+            json.dumps(dados_entrada.get('atividades_selecionadas', [])),
+            json.dumps(custos_detalhados),
+            resultados.get('receita_atual', 0),
+            resultados.get('receita_projetada', 0),
+            resultados.get('investimento_total', 0),
+            resultados.get('retorno_mensal', 0),
+            resultados.get('payback_meses', 0),
+            resultados.get('roi_percentual', 0),
+            json.dumps({'entrada': dados_entrada, 'resultados': resultados, 'custos_detalhados': custos_detalhados})
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Erro ao salvar simulação: {e}")
+        return False
 
-@dataclass
-class Aula:
-    id: int
-    turma: str
-    disciplina: str
-    professor: str
-    dia: str
-    horario: str
-    periodo: int
-    
-    def to_dict(self):
-        return asdict(self)
-
-@dataclass
-class Grade:
-    id: int
-    nome: str
-    turmas: List[str] = field(default_factory=list)
-    grupo: str = "COMPLETA"
-    aulas: List[Aula] = field(default_factory=list)
-    status: str = "RASCUNHO"
-    
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "nome": self.nome,
-            "turmas": self.turmas,
-            "grupo": self.grupo,
-            "status": self.status,
-            "aulas": [aula.to_dict() for aula in self.aulas]
-        }
-
-# ============================================
-# FUNÇÕES AUXILIARES
-# ============================================
-
-def inicializar_sessao():
-    """Inicializa as variáveis de sessão"""
-    if 'professores' not in st.session_state:
-        st.session_state.professores = []
-    if 'disciplinas' not in st.session_state:
-        st.session_state.disciplinas = []
-    if 'turmas' not in st.session_state:
-        st.session_state.turmas = []
-    if 'grades' not in st.session_state:
-        st.session_state.grades = []
-    if 'proximo_id_professor' not in st.session_state:
-        st.session_state.proximo_id_professor = 1
-    if 'proximo_id_disciplina' not in st.session_state:
-        st.session_state.proximo_id_disciplina = 1
-    if 'proximo_id_turma' not in st.session_state:
-        st.session_state.proximo_id_turma = 1
-    if 'proximo_id_grade' not in st.session_state:
-        st.session_state.proximo_id_grade = 1
-    if 'proximo_id_aula' not in st.session_state:
-        st.session_state.proximo_id_aula = 1
-    if 'aulas_por_turma' not in st.session_state:
-        st.session_state.aulas_por_turma = {}
-
-def obter_grupo_seguro(obj):
-    """Obtém o grupo de um objeto de forma segura"""
-    if hasattr(obj, 'grupo'):
-        grupo = obj.grupo
-        if grupo in ["A", "B", "AMBOS"]:
-            return grupo
-    return "AMBOS"
-
-def obter_horarios_turma(nome_turma: str):
-    """Obtém os horários disponíveis para uma turma"""
-    turma = next((t for t in st.session_state.turmas if t.nome == nome_turma), None)
-    if not turma:
+def buscar_simulacoes():
+    """Busca todas as simulações do banco de dados"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM simulacoes ORDER BY data_criacao DESC')
+        simulacoes = cursor.fetchall()
+        
+        conn.close()
+        return simulacoes
+    except Exception as e:
+        print(f"Erro ao buscar simulações: {e}")
         return []
-    
-    if "EM" in turma.serie:
-        return HORARIOS_EM
-    else:
-        return HORARIOS_EF_II
 
-def calcular_carga_maxima(serie: str) -> int:
-    """Calcula a carga horária máxima semanal para uma série (em aulas de 50min)"""
-    if "EM" in serie:
-        return 7 * 5  # 7 períodos por dia, 5 dias = 35 aulas semanais
-    else:
-        return 7 * 5  # 7 períodos por dia, 5 dias = 35 aulas semanais
-
-def analisar_cobertura_disciplinas():
-    """Analisa se todas as disciplinas têm cobertura de professores suficiente"""
-    analises = []
-    
-    for disciplina in st.session_state.disciplinas:
-        # Calcular carga total necessária para esta disciplina
-        carga_total_necessaria = disciplina.get_carga_total_necessaria()
-        
-        # Encontrar todos os professores que podem ministrar esta disciplina
-        professores_disponiveis = []
-        horas_disponiveis_total = 0
-        
-        for professor in st.session_state.professores:
-            horas_prof = professor.get_horas_disponiveis(disciplina.nome)
-            if horas_prof > 0:
-                professores_disponiveis.append({
-                    'nome': professor.nome,
-                    'horas': horas_prof,
-                    'grupo': professor.grupo
-                })
-                horas_disponiveis_total += horas_prof
-        
-        # Verificar compatibilidade de grupos
-        horas_compativel = 0
-        for prof_info in professores_disponiveis:
-            if (prof_info['grupo'] == disciplina.grupo or 
-                prof_info['grupo'] == 'AMBOS' or 
-                disciplina.grupo == 'AMBOS'):
-                horas_compativel += prof_info['horas']
-        
-        # Determinar status
-        if horas_compativel >= carga_total_necessaria:
-            status = "✅ Suficiente"
-            cor = "green"
-        elif horas_compativel > 0:
-            status = f"⚠️ Parcial ({horas_compativel}/{carga_total_necessaria})"
-            cor = "orange"
-        else:
-            status = "❌ Sem cobertura"
-            cor = "red"
-        
-        analises.append({
-            'Disciplina': disciplina.nome,
-            'Grupo': disciplina.grupo,
-            'Turmas': len(disciplina.turmas),
-            'Carga/Turma': disciplina.carga_semanal,
-            'Carga Total': carga_total_necessaria,
-            'Professores': len(professores_disponiveis),
-            'Horas Disponível': horas_disponiveis_total,
-            'Horas Compatível': horas_compativel,
-            'Status': status,
-            '_cor': cor
-        })
-    
-    return analises
-
-def calcular_necessidade_professores():
-    """Calcula se é necessário contratar mais professores ou reduzir carga"""
-    recomendacoes = []
-    
-    for disciplina in st.session_state.disciplinas:
-        carga_total = disciplina.get_carga_total_necessaria()
-        
-        # Somar horas disponíveis de professores compatíveis
-        horas_disponiveis = 0
-        professores_compativeis = []
-        
-        for professor in st.session_state.professores:
-            horas_prof = professor.get_horas_disponiveis(disciplina.nome)
-            if horas_prof > 0:
-                # Verificar compatibilidade de grupo
-                prof_grupo = professor.grupo
-                disc_grupo = disciplina.grupo
-                
-                if (prof_grupo == disc_grupo or 
-                    prof_grupo == 'AMBOS' or 
-                    disc_grupo == 'AMBOS'):
-                    horas_disponiveis += horas_prof
-                    professores_compativeis.append(professor.nome)
-        
-        deficit = carga_total - horas_disponiveis
-        
-        if deficit > 0:
-            recomendacoes.append({
-                'Disciplina': disciplina.nome,
-                'Grupo': disciplina.grupo,
-                'Carga Necessária': carga_total,
-                'Horas Disponível': horas_disponiveis,
-                'Deficit': deficit,
-                'Professores Compativeis': ', '.join(professores_compativeis) if professores_compativeis else 'Nenhum',
-                'Ação Recomendada': f"Adicionar {deficit} aulas de {disciplina.nome} (contratar ou realocar)"
-            })
-        elif horas_disponiveis == 0:
-            recomendacoes.append({
-                'Disciplina': disciplina.nome,
-                'Grupo': disciplina.grupo,
-                'Carga Necessária': carga_total,
-                'Horas Disponível': 0,
-                'Deficit': carga_total,
-                'Professores Compativeis': 'Nenhum',
-                'Ação Recomendada': f"URGENTE: Cadastrar professores para {disciplina.nome} ou remover das turmas"
-            })
-    
-    return recomendacoes
-
-def carregar_dados_exemplo():
-    """Carrega dados de exemplo para testes com balanço 490/490"""
-    
-    # Limpar dados existentes
-    st.session_state.professores = []
-    st.session_state.disciplinas = []
-    st.session_state.turmas = []
-    st.session_state.grades = []
-    
-    # Resetar IDs
-    st.session_state.proximo_id_professor = 1
-    st.session_state.proximo_id_disciplina = 1
-    st.session_state.proximo_id_turma = 1
-    st.session_state.proximo_id_grade = 1
-    st.session_state.proximo_id_aula = 1
-    
-    # ============================================
-    # TURMAS DE EXEMPLO (14 turmas)
-    # ============================================
-    turmas_exemplo = [
-        Turma(id=1, nome="6º A", serie="6º EF", grupo="A", turno="MANHÃ"),
-        Turma(id=2, nome="6º B", serie="6º EF", grupo="B", turno="MANHÃ"),
-        Turma(id=3, nome="7º A", serie="7º EF", grupo="A", turno="MANHÃ"),
-        Turma(id=4, nome="7º B", serie="7º EF", grupo="B", turno="MANHÃ"),
-        Turma(id=5, nome="8º A", serie="8º EF", grupo="A", turno="MANHÃ"),
-        Turma(id=6, nome="8º B", serie="8º EF", grupo="B", turno="MANHÃ"),
-        Turma(id=7, nome="9º A", serie="9º EF", grupo="A", turno="MANHÃ"),
-        Turma(id=8, nome="9º B", serie="9º EF", grupo="B", turno="MANHÃ"),
-        Turma(id=9, nome="1º EM A", serie="1º EM", grupo="A", turno="MANHÃ"),
-        Turma(id=10, nome="1º EM B", serie="1º EM", grupo="B", turno="MANHÃ"),
-        Turma(id=11, nome="2º EM A", serie="2º EM", grupo="A", turno="MANHÃ"),
-        Turma(id=12, nome="2º EM B", serie="2º EM", grupo="B", turno="MANHÃ"),
-        Turma(id=13, nome="3º EM A", serie="3º EM", grupo="A", turno="MANHÃ"),
-        Turma(id=14, nome="3º EM B", serie="3º EM", grupo="B", turno="MANHÃ"),
-    ]
-    
-    for turma in turmas_exemplo:
-        st.session_state.turmas.append(turma)
-        st.session_state.proximo_id_turma = max(st.session_state.proximo_id_turma, turma.id + 1)
-    
-    # ============================================
-    # DISCIPLINAS DE EXEMPLO (Ajustadas para 490 aulas)
-    # ============================================
-    # CAPACIDADE TOTAL: 14 turmas × 35 aulas = 490 períodos
-    # Vamos distribuir exatamente 490 aulas
-    
-    disciplinas_exemplo = [
-        # ========== GRUPO A - EF II (4 turmas) ==========
-        # Total: 8 disciplinas = 35 aulas/turma
-        Disciplina(id=1, nome="Matemática", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=5, professores=[]),  # 4 × 5 = 20
-        
-        Disciplina(id=2, nome="Português", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=5, professores=[]),  # 4 × 5 = 20
-        
-        Disciplina(id=3, nome="Ciências", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=4, professores=[]),  # 4 × 4 = 16
-        
-        Disciplina(id=4, nome="Geografia", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=3, professores=[]),  # 4 × 3 = 12
-        
-        Disciplina(id=5, nome="História", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=3, professores=[]),  # 4 × 3 = 12
-        
-        Disciplina(id=6, nome="Inglês", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=2, professores=[]),  # 4 × 2 = 8
-        
-        Disciplina(id=7, nome="Educação Física", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=2, professores=[]),  # 4 × 2 = 8
-        
-        Disciplina(id=8, nome="Artes", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=1, professores=[]),  # 4 × 1 = 4
-        
-        # ========== GRUPO B - EF II (4 turmas) ==========
-        Disciplina(id=9, nome="Matemática", grupo="B", 
-                  turmas=["6º B", "7º B", "8º B", "9º B"], 
-                  carga_semanal=5, professores=[]),  # 4 × 5 = 20
-        
-        Disciplina(id=10, nome="Português", grupo="B", 
-                   turmas=["6º B", "7º B", "8º B", "9º B"], 
-                   carga_semanal=5, professores=[]),  # 4 × 5 = 20
-        
-        Disciplina(id=11, nome="Ciências", grupo="B", 
-                   turmas=["6º B", "7º B", "8º B", "9º B"], 
-                   carga_semanal=4, professores=[]),  # 4 × 4 = 16
-        
-        Disciplina(id=12, nome="Geografia", grupo="B", 
-                   turmas=["6º B", "7º B", "8º B", "9º B"], 
-                   carga_semanal=3, professores=[]),  # 4 × 3 = 12
-        
-        Disciplina(id=13, nome="História", grupo="B", 
-                   turmas=["6º B", "7º B", "8º B", "9º B"], 
-                   carga_semanal=3, professores=[]),  # 4 × 3 = 12
-        
-        Disciplina(id=14, nome="Inglês", grupo="B", 
-                   turmas=["6º B", "7º B", "8º B", "9º B"], 
-                   carga_semanal=2, professores=[]),  # 4 × 2 = 8
-        
-        Disciplina(id=15, nome="Educação Física", grupo="B", 
-                   turmas=["6º B", "7º B", "8º B", "9º B"], 
-                   carga_semanal=2, professores=[]),  # 4 × 2 = 8
-        
-        Disciplina(id=16, nome="Artes", grupo="B", 
-                   turmas=["6º B", "7º B", "8º B", "9º B"], 
-                   carga_semanal=1, professores=[]),  # 4 × 1 = 4
-        
-        # ========== GRUPO A - EM (3 turmas) ==========
-        # 10 disciplinas = 35 aulas/turma
-        Disciplina(id=17, nome="Matemática", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=5, professores=[]),  # 3 × 5 = 15
-        
-        Disciplina(id=18, nome="Português", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=5, professores=[]),  # 3 × 5 = 15
-        
-        Disciplina(id=19, nome="Física", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=4, professores=[]),  # 3 × 4 = 12
-        
-        Disciplina(id=20, nome="Química", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=4, professores=[]),  # 3 × 4 = 12
-        
-        Disciplina(id=21, nome="Biologia", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=4, professores=[]),  # 3 × 4 = 12
-        
-        Disciplina(id=22, nome="História", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=3, professores=[]),  # 3 × 3 = 9
-        
-        Disciplina(id=23, nome="Geografia", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=3, professores=[]),  # 3 × 3 = 9
-        
-        Disciplina(id=24, nome="Inglês", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=2, professores=[]),  # 3 × 2 = 6
-        
-        Disciplina(id=25, nome="Educação Física", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=2, professores=[]),  # 3 × 2 = 6
-        
-        Disciplina(id=26, nome="Artes", grupo="A", 
-                  turmas=["1º EM A", "2º EM A", "3º EM A"], 
-                  carga_semanal=2, professores=[]),  # 3 × 2 = 6
-        
-        # ========== GRUPO B - EM (3 turmas) ==========
-        Disciplina(id=27, nome="Matemática", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=5, professores=[]),  # 3 × 5 = 15
-        
-        Disciplina(id=28, nome="Português", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=5, professores=[]),  # 3 × 5 = 15
-        
-        Disciplina(id=29, nome="Física", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=4, professores=[]),  # 3 × 4 = 12
-        
-        Disciplina(id=30, nome="Química", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=4, professores=[]),  # 3 × 4 = 12
-        
-        Disciplina(id=31, nome="Biologia", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=4, professores=[]),  # 3 × 4 = 12
-        
-        Disciplina(id=32, nome="História", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=3, professores=[]),  # 3 × 3 = 9
-        
-        Disciplina(id=33, nome="Geografia", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=3, professores=[]),  # 3 × 3 = 9
-        
-        Disciplina(id=34, nome="Inglês", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=2, professores=[]),  # 3 × 2 = 6
-        
-        Disciplina(id=35, nome="Educação Física", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=2, professores=[]),  # 3 × 2 = 6
-        
-        Disciplina(id=36, nome="Artes", grupo="B", 
-                   turmas=["1º EM B", "2º EM B", "3º EM B"], 
-                   carga_semanal=2, professores=[]),  # 3 × 2 = 6
-        
-        # ========== DISCIPLINAS AMBOS - EM ==========
-        Disciplina(id=37, nome="Filosofia", grupo="AMBOS", 
-                  turmas=["1º EM A", "1º EM B", "2º EM A", "2º EM B", "3º EM A", "3º EM B"], 
-                  carga_semanal=2, professores=[]),  # 6 × 2 = 12
-        
-        Disciplina(id=38, nome="Sociologia", grupo="AMBOS", 
-                  turmas=["1º EM A", "1º EM B", "2º EM A", "2º EM B", "3º EM A", "3º EM B"], 
-                  carga_semanal=2, professores=[]),  # 6 × 2 = 12
-        
-        # ========== ESPANHOL PARA EF II ==========
-        Disciplina(id=39, nome="Espanhol", grupo="A", 
-                  turmas=["6º A", "7º A", "8º A", "9º A"], 
-                  carga_semanal=2, professores=[]),  # 4 × 2 = 8
-        
-        Disciplina(id=40, nome="Espanhol", grupo="B", 
-                  turmas=["6º B", "7º B", "8º B", "9º B"], 
-                  carga_semanal=2, professores=[]),  # 4 × 2 = 8
-        
-        # ========== TECNOLOGIA PARA TODOS ==========
-        Disciplina(id=41, nome="Tecnologia", grupo="AMBOS", 
-                  turmas=["6º A", "6º B", "7º A", "7º B", "8º A", "8º B", "9º A", "9º B",
-                         "1º EM A", "1º EM B", "2º EM A", "2º EM B", "3º EM A", "3º EM B"], 
-                  carga_semanal=2, professores=[]),  # 14 × 2 = 28
-    ]
-    
-    for disciplina in disciplinas_exemplo:
-        st.session_state.disciplinas.append(disciplina)
-        st.session_state.proximo_id_disciplina = max(st.session_state.proximo_id_disciplina, disciplina.id + 1)
-    
-    # ============================================
-    # VERIFICAÇÃO E AJUSTE PARA 490 AULAS
-    # ============================================
-    # Calcular total atual
-    total_aulas = sum(d.get_carga_total_necessaria() for d in st.session_state.disciplinas)
-    
-    # Ajustar se necessário
-    if total_aulas != 490:
-        # Encontrar disciplina para ajustar (Tecnologia)
-        for disc in st.session_state.disciplinas:
-            if disc.nome == "Tecnologia":
-                # Calcular ajuste necessário
-                ajuste = 490 - total_aulas
-                # Aumentar ou diminuir carga
-                disc.carga_semanal += 1  # Aumenta de 2 para 3
-                break
-    
-    # ============================================
-    # PROFESSORES DE EXEMPLO (com 490 horas totais)
-    # ============================================
-    professores_exemplo = [
-        # ========== PROFESSORES GRUPO A ==========
-        Professor(id=1, nome="Maria Silva", grupo="A", 
-                 disciplinas={"Matemática": 35}, max_aulas_dia=6, min_aulas_dia=2),
-        
-        Professor(id=2, nome="João Santos", grupo="A", 
-                 disciplinas={"Português": 35}, max_aulas_dia=5, min_aulas_dia=3),
-        
-        Professor(id=3, nome="Ana Costa", grupo="A", 
-                 disciplinas={"Ciências": 16, "Biologia": 12}, max_aulas_dia=6, min_aulas_dia=2),
-        
-        Professor(id=4, nome="Carlos Mendes", grupo="A", 
-                 disciplinas={"Geografia": 25, "História": 21}, max_aulas_dia=5, min_aulas_dia=2),
-        
-        Professor(id=5, nome="Roberto Física", grupo="A", 
-                 disciplinas={"Física": 12, "Química": 12}, max_aulas_dia=5, min_aulas_dia=2),
-        
-        Professor(id=6, nome="Cláudia Idiomas", grupo="A", 
-                 disciplinas={"Inglês": 14, "Espanhol": 8}, max_aulas_dia=4, min_aulas_dia=2),
-        
-        # ========== PROFESSORES GRUPO B ==========
-        Professor(id=7, nome="Pedro Oliveira", grupo="B", 
-                 disciplinas={"Matemática": 35}, max_aulas_dia=5, min_aulas_dia=3),
-        
-        Professor(id=8, nome="Carla Souza", grupo="B", 
-                 disciplinas={"Português": 35}, max_aulas_dia=6, min_aulas_dia=2),
-        
-        Professor(id=9, nome="Sofia Lima", grupo="B", 
-                 disciplinas={"Ciências": 16, "Biologia": 12}, max_aulas_dia=5, min_aulas_dia=2),
-        
-        Professor(id=10, nome="Fernando Almeida", grupo="B", 
-                  disciplinas={"Geografia": 25, "História": 21}, max_aulas_dia=4, min_aulas_dia=2),
-        
-        Professor(id=11, nome="Patrícia Química", grupo="B", 
-                  disciplinas={"Física": 12, "Química": 12}, max_aulas_dia=5, min_aulas_dia=2),
-        
-        Professor(id=12, nome="Ricardo Idiomas", grupo="B", 
-                  disciplinas={"Inglês": 14, "Espanhol": 8}, max_aulas_dia=4, min_aulas_dia=2),
-        
-        # ========== PROFESSORES AMBOS ==========
-        Professor(id=13, nome="Marcos Ribeiro", grupo="AMBOS", 
-                  disciplinas={"Educação Física": 28}, max_aulas_dia=5, min_aulas_dia=3),
-        
-        Professor(id=14, nome="Patrícia Cardoso", grupo="AMBOS", 
-                  disciplinas={"Artes": 20}, max_aulas_dia=5, min_aulas_dia=2),
-        
-        Professor(id=15, nome="Fernanda Filosofia", grupo="AMBOS", 
-                  disciplinas={"Filosofia": 12, "Sociologia": 12}, max_aulas_dia=4, min_aulas_dia=2),
-        
-        Professor(id=16, nome="Carla Tecnologia", grupo="AMBOS", 
-                  disciplinas={"Tecnologia": 28}, max_aulas_dia=6, min_aulas_dia=3),
-    ]
-    
-    for professor in professores_exemplo:
-        st.session_state.professores.append(professor)
-        st.session_state.proximo_id_professor = max(st.session_state.proximo_id_professor, professor.id + 1)
-    
-    # ============================================
-    # VERIFICAÇÃO FINAL DO BALANÇO
-    # ============================================
-    # Calcular totais
-    capacidade_total = 14 * 35  # 14 turmas × 35 períodos = 490
-    
-    aulas_necessarias = 0
-    for disciplina in st.session_state.disciplinas:
-        aulas_necessarias += disciplina.get_carga_total_necessaria()
-    
-    horas_disponiveis = 0
-    for professor in st.session_state.professores:
-        horas_disponiveis += professor.get_total_horas_disponiveis()
-    
-    return True
-
-def verificar_base_vazia():
-    """Verifica se a base está vazia"""
-    return (len(st.session_state.turmas) == 0 and 
-            len(st.session_state.disciplinas) == 0 and 
-            len(st.session_state.professores) == 0)
-
-def verificar_balanco_490():
-    """Verifica se o sistema está com balanço 490/490/490"""
-    # Calcular capacidade total
-    capacidade_total = 0
-    for turma in st.session_state.turmas:
-        horarios = obter_horarios_turma(turma.nome)
-        capacidade_total += len(DIAS_SEMANA) * len(horarios)
-    
-    # Calcular aulas necessárias
-    aulas_necessarias = 0
-    for disciplina in st.session_state.disciplinas:
-        aulas_necessarias += disciplina.get_carga_total_necessaria()
-    
-    # Calcular horas disponíveis
-    horas_disponiveis = 0
-    for professor in st.session_state.professores:
-        horas_disponiveis += professor.get_total_horas_disponiveis()
-    
-    return capacidade_total, aulas_necessarias, horas_disponiveis
-
-# ============================================
-# FUNÇÕES NOVAS ADICIONADAS
-# ============================================
-
-def mostrar_grade_visual(turma_nome, aulas_turma):
-    """Mostra uma grade visual para uma turma específica"""
-    if not aulas_turma:
-        st.info(f"Nenhuma aula alocada para a turma {turma_nome}")
-        return
-    
-    # Obter horários da turma
-    horarios = obter_horarios_turma(turma_nome)
-    
-    # Criar grade vazia
-    grade_data = []
-    for dia in DIAS_SEMANA:
-        dia_data = {"Dia": dia}
-        for i, (inicio, fim) in enumerate(horarios):
-            periodo = i + 1
-            horario_str = f"{inicio}-{fim}"
-            
-            # Encontrar aula para este dia e horário
-            aula = next((a for a in aulas_turma if a.dia == dia and a.horario == horario_str), None)
-            
-            if aula:
-                dia_data[f"P{periodo}"] = f"{aula.disciplina}\n{aula.professor if aula.professor != 'SEM PROFESSOR' else ''}"
-            else:
-                dia_data[f"P{periodo}"] = "Livre"
-        
-        grade_data.append(dia_data)
-    
-    # Converter para DataFrame
-    df_grade = pd.DataFrame(grade_data)
-    
-    # Mostrar grade
-    st.subheader(f"📅 Grade Visual - {turma_nome}")
-    st.dataframe(df_grade.set_index('Dia'), use_container_width=True)
-
-def exportar_grade_excel(grade):
-    """Exporta uma grade para Excel"""
-    if not grade.aulas:
-        st.warning("Nenhuma aula para exportar")
+def buscar_simulacao_por_id(id):
+    """Busca uma simulação específica por ID"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM simulacoes WHERE id = ?', (id,))
+        simulacao = cursor.fetchone()
+        
+        conn.close()
+        return simulacao
+    except Exception as e:
+        print(f"Erro ao buscar simulação: {e}")
         return None
-    
-    # Criar DataFrame com todas as aulas
-    dados = []
-    for aula in grade.aulas:
-        dados.append({
-            "ID": aula.id,
-            "Turma": aula.turma,
-            "Disciplina": aula.disciplina,
-            "Professor": aula.professor,
-            "Dia": aula.dia,
-            "Horário": aula.horario,
-            "Período": aula.periodo
-        })
-    
-    df = pd.DataFrame(dados)
-    
-    # Criar um arquivo Excel com múltiplas abas
-    excel_buffer = pd.ExcelWriter('grade_temp.xlsx', engine='openpyxl')
-    
-    # Aba principal com todas as aulas
-    df.to_excel(excel_buffer, sheet_name='Todas Aulas', index=False)
-    
-    # Abas separadas por turma
-    turmas_unicas = df['Turma'].unique()
-    for turma in turmas_unicas:
-        df_turma = df[df['Turma'] == turma].copy()
-        df_turma.to_excel(excel_buffer, sheet_name=turma[:31], index=False)  # Limitando nome da aba
-    
-    excel_buffer.close()
-    
-    # Ler o arquivo para download
-    with open('grade_temp.xlsx', 'rb') as f:
-        excel_data = f.read()
-    
-    return excel_data
 
-def gerar_relatorio_detalhado():
-    """Gera um relatório detalhado do sistema"""
-    relatorio = {
-        "professores": [],
-        "disciplinas": [],
-        "turmas": [],
-        "grades": []
+# Funções de cálculo aprimoradas
+def calcular_custos_detalhados(dados_entrada):
+    """Calcula custos detalhados por categoria"""
+    nivel = dados_entrada.get('nivel_escolar', 'fundamental_i')
+    alunos_atuais = dados_entrada.get('alunos_atuais', 0)
+    novos_alunos = int(alunos_atuais * (dados_entrada.get('aumento_esperado', 0) / 100))
+    total_alunos_projetado = alunos_atuais + novos_alunos
+    
+    # Configurações do nível escolar
+    config_nivel = CUSTOS_POR_NIVEL.get(nivel, CUSTOS_POR_NIVEL['fundamental_i'])
+    
+    # Atividades selecionadas
+    atividades_selecionadas = dados_entrada.get('atividades_selecionadas', [])
+    num_atividades = len(atividades_selecionadas) if atividades_selecionadas else 3
+    
+    # Cálculo de professores necessários
+    ratio = config_nivel['ratio_professor_aluno']
+    professores_necessarios = math.ceil(total_alunos_projetado / ratio)
+    
+    custos_detalhados = {
+        'categorias': {},
+        'resumo': {},
+        'nivel_escolar': nivel,
+        'atividades_selecionadas': atividades_selecionadas
     }
     
-    # Dados dos professores
-    for prof in st.session_state.professores:
-        relatorio["professores"].append({
-            "nome": prof.nome,
-            "grupo": prof.grupo,
-            "total_horas": prof.get_total_horas_disponiveis(),
-            "disciplinas": list(prof.disciplinas.keys())
-        })
+    # 1. CUSTOS COM PROFESSORES
+    horas_semanais = dados_entrada.get('horas_semanais', 10)
+    semanas_mes = 4.3
+    custo_hora = config_nivel['custo_professor_por_hora']
     
-    # Dados das disciplinas
-    for disc in st.session_state.disciplinas:
-        relatorio["disciplinas"].append({
-            "nome": disc.nome,
-            "grupo": disc.grupo,
-            "carga_semanal": disc.carga_semanal,
-            "turmas": disc.turmas,
-            "carga_total": disc.get_carga_total_necessaria()
-        })
+    custo_professores = professores_necessarios * custo_hora * horas_semanais * semanas_mes
+    custos_detalhados['categorias']['professores'] = {
+        'total': custo_professores,
+        'detalhes': [
+            {'item': f'Professores especializados ({professores_necessarios})', 'valor': custo_professores * 0.7},
+            {'item': 'Coordenador de atividades', 'valor': custo_professores * 0.2},
+            {'item': 'Substituições e reserva', 'valor': custo_professores * 0.1}
+        ]
+    }
     
-    # Dados das turmas
-    for turma in st.session_state.turmas:
-        relatorio["turmas"].append({
-            "nome": turma.nome,
-            "serie": turma.serie,
-            "grupo": turma.grupo,
-            "turno": turma.turno
-        })
+    # 2. CUSTOS DE INFRAESTRUTURA (seleção do usuário)
+    infra_itens_selecionados = dados_entrada.get('infra_itens_selecionados', [])
+    custo_infra = 0
+    detalhes_infra = []
     
-    # Dados das grades
-    for grade in st.session_state.grades:
-        relatorio["grades"].append({
-            "nome": grade.nome,
-            "turmas": grade.turmas,
-            "total_aulas": len(grade.aulas),
-            "status": grade.status
-        })
-    
-    return relatorio
-
-# ============================================
-# ALGORITMO DE GERAÇÃO DE GRADE MELHORADO
-# ============================================
-
-class GeradorGrade:
-    def __init__(self, turmas_filtradas, disciplinas_filtradas, professores_filtrados):
-        self.turmas = turmas_filtradas
-        self.disciplinas = disciplinas_filtradas
-        self.professores = professores_filtrados
-        self.proximo_id_aula = st.session_state.proximo_id_aula
-        self.aulas_alocadas = []
-        self.conflitos = 0
-        self.tentativas_maximas = 100
-        
-        # Controle de horas utilizadas por professor
-        self.horas_utilizadas = {}
-        for professor in self.professores:
-            self.horas_utilizadas[professor.nome] = {}
-            for disciplina_nome in professor.disciplinas.keys():
-                self.horas_utilizadas[professor.nome][disciplina_nome] = 0
-    
-    def encontrar_professor_disponivel(self, disciplina_nome: str, grupo_turma: str):
-        """Encontra um professor disponível para a disciplina"""
-        professores_candidatos = []
-        
-        for professor in self.professores:
-            # Verificar se professor tem horas disponíveis para esta disciplina
-            horas_disponiveis = professor.get_horas_disponiveis(disciplina_nome)
-            if horas_disponiveis <= 0:
-                continue
-            
-            # Verificar compatibilidade de grupo
-            prof_grupo = professor.grupo
-            if not (prof_grupo == grupo_turma or prof_grupo == 'AMBOS' or grupo_turma == 'AMBOS'):
-                continue
-            
-            # Verificar se já usou todas as horas disponíveis
-            horas_usadas = self.horas_utilizadas.get(professor.nome, {}).get(disciplina_nome, 0)
-            if horas_usadas < horas_disponiveis:
-                professores_candidatos.append({
-                    'professor': professor,
-                    'horas_disponiveis': horas_disponiveis,
-                    'horas_usadas': horas_usadas,
-                    'prioridade': horas_disponiveis - horas_usadas  # Prioriza quem tem mais horas livres
+    for item_nome in infra_itens_selecionados:
+        for item in CATEGORIAS_CUSTOS['infraestrutura']['itens']:
+            if item['nome'] == item_nome:
+                custo_item = item['custo_base']
+                # Ajuste por nível escolar
+                if nivel == 'infantil':
+                    custo_item *= 0.8
+                elif nivel == 'medio':
+                    custo_item *= 1.2
+                
+                custo_infra += custo_item
+                detalhes_infra.append({
+                    'item': item_nome,
+                    'valor': custo_item,
+                    'descricao': item.get('descricao', '')
                 })
-        
-        if professores_candidatos:
-            # Ordenar por prioridade (mais horas livres primeiro)
-            professores_candidatos.sort(key=lambda x: x['prioridade'], reverse=True)
-            return professores_candidatos[0]['professor']
-        
-        return None
+                break
     
-    def gerar_grade_simples(self):
-        """Algoritmo simples de geração de grade com controle de horas"""
-        aulas_por_turma = {turma.nome: [] for turma in self.turmas}
-        
-        # Para cada turma, distribuir as disciplinas
-        for turma in self.turmas:
-            grupo_turma = obter_grupo_seguro(turma)
-            disciplinas_turma = [
-                d for d in self.disciplinas 
-                if turma.nome in d.turmas and obter_grupo_seguro(d) == grupo_turma
-            ]
-            
-            # Coletar todas as aulas necessárias
-            aulas_necessarias = []
-            for disc in disciplinas_turma:
-                for _ in range(disc.carga_semanal):
-                    aulas_necessarias.append(disc.nome)
-            
-            # Misturar aulas para distribuição mais aleatória
-            random.shuffle(aulas_necessarias)
-            
-            # Obter horários disponíveis
-            horarios_disponiveis = obter_horarios_turma(turma.nome)
-            dias_disponiveis = DIAS_SEMANA.copy()
-            
-            # Distribuir aulas nos horários
-            periodo = 0
-            for disciplina_nome in aulas_necessarias:
-                if periodo >= len(horarios_disponiveis) * len(dias_disponiveis):
-                    # Tentar redistribuir em horários já usados
-                    for dia in dias_disponiveis:
-                        for i, (inicio, fim) in enumerate(horarios_disponiveis):
-                            # Verificar se este horário já tem aula
-                            horario_str = f"{inicio}-{fim}"
-                            existe_aula = any(a for a in aulas_por_turma[turma.nome] 
-                                            if a.dia == dia and a.horario == horario_str)
-                            
-                            if not existe_aula:
-                                # Encontrar professor disponível
-                                professor = self.encontrar_professor_disponivel(disciplina_nome, grupo_turma)
-                                
-                                if professor:
-                                    professor_nome = professor.nome
-                                    # Atualizar horas utilizadas
-                                    if disciplina_nome not in self.horas_utilizadas[professor_nome]:
-                                        self.horas_utilizadas[professor_nome][disciplina_nome] = 0
-                                    self.horas_utilizadas[professor_nome][disciplina_nome] += 1
-                                else:
-                                    professor_nome = ""  # Nome do professor em branco
-                                
-                                aula = Aula(
-                                    id=self.proximo_id_aula,
-                                    turma=turma.nome,
-                                    disciplina=disciplina_nome,
-                                    professor=professor_nome,
-                                    dia=dia,
-                                    horario=horario_str,
-                                    periodo=i + 1
-                                )
-                                
-                                self.aulas_alocadas.append(aula)
-                                aulas_por_turma[turma.nome].append(aula)
-                                self.proximo_id_aula += 1
-                                break
-                        else:
-                            continue
-                        break
-                    else:
-                        break  # Não há mais horários disponíveis
-                    continue
-                
-                # Distribuição normal
-                dia_idx = periodo // len(horarios_disponiveis)
-                horario_idx = periodo % len(horarios_disponiveis)
-                
-                if dia_idx < len(dias_disponiveis):
-                    dia = dias_disponiveis[dia_idx]
-                    horario = f"{horarios_disponiveis[horario_idx][0]}-{horarios_disponiveis[horario_idx][1]}"
-                    
-                    # Encontrar professor disponível
-                    professor = self.encontrar_professor_disponivel(disciplina_nome, grupo_turma)
-                    
-                    if professor:
-                        professor_nome = professor.nome
-                        # Atualizar horas utilizadas
-                        if disciplina_nome not in self.horas_utilizadas[professor_nome]:
-                            self.horas_utilizadas[professor_nome][disciplina_nome] = 0
-                        self.horas_utilizadas[professor_nome][disciplina_nome] += 1
-                    else:
-                        professor_nome = ""  # Nome do professor em branco
-                    
-                    aula = Aula(
-                        id=self.proximo_id_aula,
-                        turma=turma.nome,
-                        disciplina=disciplina_nome,
-                        professor=professor_nome,
-                        dia=dia,
-                        horario=horario,
-                        periodo=horario_idx + 1
-                    )
-                    
-                    self.aulas_alocadas.append(aula)
-                    aulas_por_turma[turma.nome].append(aula)
-                    self.proximo_id_aula += 1
-                    periodo += 1
-        
-        # Salvar aulas por turma na sessão
-        for turma_nome, aulas in aulas_por_turma.items():
-            st.session_state.aulas_por_turma[turma_nome] = aulas
-        
-        return self.aulas_alocadas, aulas_por_turma
+    if not detalhes_infra:
+        # Valor padrão se nenhum item selecionado
+        custo_infra = dados_entrada.get('custo_infraestrutura', 1000)
+        detalhes_infra.append({
+            'item': 'Adaptações básicas',
+            'valor': custo_infra,
+            'descricao': 'Reformas e adaptações necessárias'
+        })
     
-    def verificar_conflitos(self):
-        """Verifica conflitos na grade gerada"""
-        conflitos = 0
-        
-        # Verificar professores em dois lugares ao mesmo tempo
-        professor_horarios = {}
-        
-        for aula in self.aulas_alocadas:
-            if aula.professor == "" or aula.professor == "SEM PROFESSOR":
-                continue
-                
-            chave = f"{aula.professor}_{aula.dia}_{aula.horario}"
-            if chave in professor_horarios:
-                conflitos += 1
-            else:
-                professor_horarios[chave] = aula
-        
-        return conflitos
+    custos_detalhados['categorias']['infraestrutura'] = {
+        'total': custo_infra,
+        'detalhes': detalhes_infra
+    }
     
-    def gerar_relatorio_utilizacao(self):
-        """Gera relatório de utilização das horas dos professores"""
-        relatorio = []
-        
-        for professor in self.professores:
-            for disciplina_nome, horas_disponiveis in professor.disciplinas.items():
-                horas_usadas = self.horas_utilizadas.get(professor.nome, {}).get(disciplina_nome, 0)
-                utilizacao = (horas_usadas / horas_disponiveis * 100) if horas_disponiveis > 0 else 0
+    # 3. CUSTOS DE MATERIAL (por aluno)
+    material_itens_selecionados = dados_entrada.get('material_itens_selecionados', [])
+    custo_material = 0
+    detalhes_material = []
+    
+    for item_nome in material_itens_selecionados:
+        for item in CATEGORIAS_CUSTOS['material']['itens']:
+            if item['nome'] == item_nome:
+                if item.get('por_aluno', False):
+                    custo_item = item['custo_base'] * total_alunos_projetado
+                else:
+                    custo_item = item['custo_base']
                 
-                relatorio.append({
-                    'Professor': professor.nome,
-                    'Disciplina': disciplina_nome,
-                    'Horas Disponível': horas_disponiveis,
-                    'Horas Utilizada': horas_usadas,
-                    'Utilização (%)': f"{utilizacao:.1f}%",
-                    'Status': '✅ OK' if horas_usadas <= horas_disponiveis else '❌ Excedido'
+                custo_material += custo_item
+                detalhes_material.append({
+                    'item': item_nome,
+                    'valor': custo_item,
+                    'por_aluno': item.get('por_aluno', False)
                 })
-        
-        return relatorio
-
-# ============================================
-# INTERFACE STREAMLIT PRINCIPAL
-# ============================================
-
-def main():
-    st.set_page_config(
-        page_title="Sistema de Grade Horária",
-        page_icon="📚",
-        layout="wide"
-    )
+                break
     
-    st.title("📚 Sistema de Grade Horária Escolar")
-    st.markdown("---")
+    if not detalhes_material:
+        # Valor padrão por aluno
+        custo_material_por_aluno = config_nivel['material_mensal_por_aluno']
+        custo_material = custo_material_por_aluno * total_alunos_projetado
+        detalhes_material.append({
+            'item': 'Material didático básico',
+            'valor': custo_material,
+            'por_aluno': True
+        })
     
-    # Inicializar sessão
-    inicializar_sessao()
+    custos_detalhados['categorias']['material'] = {
+        'total': custo_material,
+        'detalhes': detalhes_material
+    }
     
-    # ============================================
-    # SIDEBAR COM ABAS ORIGINAIS
-    # ============================================
+    # 4. CUSTOS DE MARKETING
+    marketing_itens_selecionados = dados_entrada.get('marketing_itens_selecionados', [])
+    custo_marketing = 0
+    detalhes_marketing = []
     
-    # Logo e título na sidebar
-    st.sidebar.image("https://via.placeholder.com/300x100/4B0082/FFFFFF?text=GRADE+HORÁRIA", use_column_width=True)
-    
-    # Menu de navegação principal
-    st.sidebar.title("📚 Navegação")
-    menu = st.sidebar.radio(
-        "Selecione a página:",
-        ["🏠 Dashboard", "👨‍🏫 Professores", "📚 Disciplinas", 
-         "👥 Turmas", "📊 Análise de Cobertura", "🗓️ Gerar Grade", "📋 Visualizar Grades"]
-    )
-    
-    # ============================================
-    # BOTÕES DE ADMINISTRAÇÃO NA SIDEBAR
-    # ============================================
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("⚙️ Administração")
-    
-    # Botão para carregar dados de exemplo
-    if st.sidebar.button("📥 Carregar Dados Exemplo", use_container_width=True):
-        with st.spinner("Carregando dados de exemplo..."):
-            carregar_dados_exemplo()
-            st.sidebar.success("✅ Dados carregados!")
-            st.rerun()
-    
-    # Botão para verificar balanço
-    if st.sidebar.button("⚖️ Verificar Balanço 490/490", use_container_width=True):
-        if st.session_state.turmas:
-            capacidade, necessarias, disponiveis = verificar_balanco_490()
-            if capacidade == 490 and necessarias == 490 and disponiveis == 490:
-                st.sidebar.success("✅ Sistema equilibrado: 490/490/490")
-            else:
-                st.sidebar.error(f"❌ Desequilibrado: {capacidade}/{necessarias}/{disponiveis}")
-    
-    # Botão para limpar todos os dados
-    if st.sidebar.button("🗑️ Limpar Todos os Dados", type="secondary", use_container_width=True):
-        if st.sidebar.checkbox("Confirmar limpeza total"):
-            st.session_state.professores = []
-            st.session_state.disciplinas = []
-            st.session_state.turmas = []
-            st.session_state.grades = []
-            st.session_state.proximo_id_professor = 1
-            st.session_state.proximo_id_disciplina = 1
-            st.session_state.proximo_id_turma = 1
-            st.session_state.proximo_id_grade = 1
-            st.session_state.proximo_id_aula = 1
-            st.sidebar.success("✅ Todos os dados foram limpos!")
-            st.rerun()
-    
-    # Estatísticas rápidas na sidebar
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📊 Estatísticas")
-    st.sidebar.write(f"👨‍🏫 Professores: {len(st.session_state.professores)}")
-    st.sidebar.write(f"📚 Disciplinas: {len(st.session_state.disciplinas)}")
-    st.sidebar.write(f"👥 Turmas: {len(st.session_state.turmas)}")
-    st.sidebar.write(f"🗓️ Grades: {len(st.session_state.grades)}")
-    
-    # Verificar balanço na sidebar
-    if st.session_state.turmas:
-        capacidade, necessarias, disponiveis = verificar_balanco_490()
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("⚖️ Balanço")
-        st.sidebar.write(f"Capacidade: {capacidade}/490")
-        st.sidebar.write(f"Aulas necessárias: {necessarias}/490")
-        st.sidebar.write(f"Horas disponíveis: {disponiveis}/490")
-        
-        if capacidade == 490 and necessarias == 490 and disponiveis == 490:
-            st.sidebar.success("✅ Equilibrado!")
-        else:
-            st.sidebar.error("❌ Desequilibrado")
-    
-    # ============================================
-    # CONTEÚDO PRINCIPAL BASEADO NA ABA SELECIONADA
-    # ============================================
-    
-    # Verificar se base está vazia e mostrar alerta
-    if verificar_base_vazia():
-        st.warning("⚠️ A base de dados está vazia!")
-        
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            if st.button("📥 Carregar Dados de Exemplo (490/490)", type="primary", use_container_width=True):
-                with st.spinner("Carregando dados de exemplo..."):
-                    carregar_dados_exemplo()
-                    st.success("✅ Dados de exemplo carregados com sucesso!")
-                    st.rerun()
-        
-        st.info("💡 Após carregar os dados de exemplo, você pode:")
-        st.write("1. Verificar o balanço 490/490 no Dashboard")
-        st.write("2. Usar a aba '📊 Análise de Cobertura' para verificar se há horas suficientes")
-        st.write("3. Gerar grades na aba '🗓️ Gerar Grade'")
-        st.write("4. Adicionar, editar ou remover dados conforme necessário")
-        
-        st.markdown("---")
-        return
-    
-    # ============================================
-    # DASHBOARD
-    # ============================================
-    if menu == "🏠 Dashboard":
-        st.header("📊 Dashboard")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Professores", len(st.session_state.professores))
-        with col2:
-            st.metric("Disciplinas", len(st.session_state.disciplinas))
-        with col3:
-            st.metric("Turmas", len(st.session_state.turmas))
-        with col4:
-            st.metric("Grades Geradas", len(st.session_state.grades))
-        
-        # Verificação do balanço 490/490
-        st.markdown("---")
-        st.subheader("⚖️ Verificação do Balanço 490/490/490")
-        
-        capacidade, necessarias, disponiveis = verificar_balanco_490()
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Capacidade Total", capacidade, delta=f"{capacidade-490}")
-        with col2:
-            st.metric("Aulas Necessárias", necessarias, delta=f"{necessarias-490}")
-        with col3:
-            st.metric("Horas Disponíveis", disponiveis, delta=f"{disponiveis-490}")
-        
-        if capacidade == 490 and necessarias == 490 and disponiveis == 490:
-            st.success("✅ PERFEITO! Sistema equilibrado em 490/490/490")
-        else:
-            st.error("❌ Sistema desequilibrado!")
-        
-        # Análise rápida de cobertura
-        st.markdown("---")
-        st.subheader("📈 Análise Rápida de Cobertura")
-        
-        analises = analisar_cobertura_disciplinas()
-        
-        if analises:
-            # Calcular estatísticas
-            total_disciplinas = len(analises)
-            disciplinas_ok = sum(1 for a in analises if '✅' in a['Status'])
-            disciplinas_parcial = sum(1 for a in analises if '⚠️' in a['Status'])
-            disciplinas_problema = sum(1 for a in analises if '❌' in a['Status'])
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("✅ Cobertas", disciplinas_ok)
-            with col2:
-                st.metric("⚠️ Parciais", disciplinas_parcial)
-            with col3:
-                st.metric("❌ Críticas", disciplinas_problema)
-            
-            if disciplinas_problema > 0:
-                st.error(f"⚠️ {disciplinas_problema} disciplina(s) sem cobertura de professores!")
-                st.info("Acesse a aba '📊 Análise de Cobertura' para detalhes.")
-    
-    # ============================================
-    # ABA PROFESSORES
-    # ============================================
-    elif menu == "👨‍🏫 Professores":
-        st.header("👨‍🏫 Gerenciamento de Professores")
-        
-        # Verificar disciplinas cadastradas primeiro
-        disciplinas_existentes = [d.nome for d in st.session_state.disciplinas]
-        
-        if not disciplinas_existentes:
-            st.warning("⚠️ Cadastre disciplinas primeiro para associar aos professores.")
-        
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.subheader("➕ Adicionar Professor")
-            
-            with st.form("form_professor"):
-                nome = st.text_input("Nome do Professor")
-                grupo = st.selectbox("Grupo", ["A", "B", "AMBOS"])
-                
-                # Configuração de horas por disciplina
-                st.markdown("**Horas por Disciplina (aulas de 50min):**")
-                disciplinas_horas = {}
-                
-                if disciplinas_existentes:
-                    # Usar um contador único para cada linha
-                    contador = 0
-                    for disciplina_nome in disciplinas_existentes:
-                        contador += 1
-                        col_a, col_b = st.columns([3, 1])
-                        with col_a:
-                            st.write(disciplina_nome)
-                        with col_b:
-                            # Chave única usando contador + hash
-                            horas = st.number_input(
-                                f"Horas",
-                                min_value=0,
-                                max_value=40,
-                                value=0,
-                                key=f"horas_{contador}_{hash(disciplina_nome)}"
-                            )
-                            if horas > 0:
-                                disciplinas_horas[disciplina_nome] = horas
-                else:
-                    st.info("Nenhuma disciplina cadastrada")
-                
-                col_sub1, col_sub2 = st.columns(2)
-                with col_sub1:
-                    max_aulas_dia = st.number_input("Máx Aulas/Dia", 1, 10, 6, key="prof_max_aulas")
-                with col_sub2:
-                    min_aulas_dia = st.number_input("Mín Aulas/Dia", 0, 5, 0, key="prof_min_aulas")
-                
-                if st.form_submit_button("💾 Salvar Professor"):
-                    if nome:
-                        professor = Professor(
-                            id=st.session_state.proximo_id_professor,
-                            nome=nome,
-                            grupo=grupo,
-                            disciplinas=disciplinas_horas,
-                            max_aulas_dia=max_aulas_dia,
-                            min_aulas_dia=min_aulas_dia
-                        )
-                        
-                        st.session_state.professores.append(professor)
-                        st.session_state.proximo_id_professor += 1
-                        st.success(f"Professor {nome} cadastrado!")
-                        st.rerun()
-        
-        with col2:
-            st.subheader("📋 Lista de Professores")
-            
-            if st.session_state.professores:
-                # Selecionar professor para detalhes
-                professores_nomes = [p.nome for p in st.session_state.professores]
-                professor_detalhe = st.selectbox("Selecionar professor para detalhes", 
-                                               ["Selecione..."] + professores_nomes,
-                                               key="select_detalhe_prof")
-                
-                if professor_detalhe != "Selecione...":
-                    professor = next((p for p in st.session_state.professores 
-                                    if p.nome == professor_detalhe), None)
-                    
-                    if professor:
-                        col_info1, col_info2 = st.columns(2)
-                        with col_info1:
-                            st.write(f"**Nome:** {professor.nome}")
-                            st.write(f"**Grupo:** {professor.grupo}")
-                        with col_info2:
-                            st.write(f"**Máx Aulas/Dia:** {professor.max_aulas_dia}")
-                            st.write(f"**Mín Aulas/Dia:** {professor.min_aulas_dia}")
-                        
-                        st.markdown("**Disciplinas e Horas (aulas de 50min):**")
-                        if professor.disciplinas:
-                            df_disciplinas = pd.DataFrame(
-                                professor.disciplinas.items(),
-                                columns=['Disciplina', 'Horas Disponíveis']
-                            )
-                            st.dataframe(df_disciplinas, use_container_width=True)
-                            
-                            total_horas = professor.get_total_horas_disponiveis()
-                            st.write(f"**Total de horas disponíveis:** {total_horas} aulas")
-                        else:
-                            st.warning("Este professor não tem disciplinas associadas")
-                
-                # Lista completa em formato de tabela
-                st.markdown("---")
-                st.subheader("📊 Todos os Professores")
-                
-                dados_professores = []
-                for prof in st.session_state.professores:
-                    total_horas = prof.get_total_horas_disponiveis()
-                    num_disciplinas = len(prof.disciplinas)
-                    
-                    dados_professores.append({
-                        "ID": prof.id,
-                        "Nome": prof.nome,
-                        "Grupo": prof.grupo,
-                        "Disciplinas": num_disciplinas,
-                        "Total Horas": total_horas,
-                        "Máx/Dia": prof.max_aulas_dia,
-                        "Mín/Dia": prof.min_aulas_dia
-                    })
-                
-                df = pd.DataFrame(dados_professores)
-                st.dataframe(df, use_container_width=True)
-                
-                # Opção de remover
-                st.markdown("---")
-                st.subheader("🗑️ Remover Professor")
-                professor_remover = st.selectbox("Selecionar professor para remover", 
-                                               ["Selecione..."] + professores_nomes,
-                                               key="select_remover_prof")
-                
-                if st.button("🗑️ Remover Professor", type="secondary", key="btn_remover_professor"):
-                    if professor_remover != "Selecione...":
-                        st.session_state.professores = [p for p in st.session_state.professores 
-                                                      if p.nome != professor_remover]
-                        st.success(f"Professor {professor_remover} removido!")
-                        st.rerun()
-            else:
-                st.info("📭 Nenhum professor cadastrado ainda.")
-    
-    # ============================================
-    # ABA ANÁLISE DE COBERTURA
-    # ============================================
-    elif menu == "📊 Análise de Cobertura":
-        st.header("📊 Análise de Cobertura de Professores")
-        
-        # Análise detalhada
-        analises = analisar_cobertura_disciplinas()
-        
-        if analises:
-            # Converter para DataFrame
-            df_analise = pd.DataFrame(analises)
-            
-            # Remover coluna interna de cor
-            df_display = df_analise.drop('_cor', axis=1)
-            
-            # Exibir tabela
-            st.dataframe(df_display, use_container_width=True)
-            
-            # Estatísticas
-            st.markdown("---")
-            st.subheader("📈 Estatísticas")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                total_carga = df_analise['Carga Total'].sum()
-                st.metric("Carga Horária Total", total_carga)
-            
-            with col2:
-                total_horas_disp = df_analise['Horas Disponível'].sum()
-                st.metric("Horas Disponíveis", total_horas_disp)
-            
-            with col3:
-                total_horas_comp = df_analise['Horas Compatível'].sum()
-                st.metric("Horas Compatíveis", total_horas_comp)
-            
-            # Recomendações
-            st.markdown("---")
-            st.subheader("🎯 Recomendações")
-            
-            recomendacoes = calcular_necessidade_professores()
-            
-            if recomendacoes:
-                st.warning("⚠️ Ações necessárias:")
-                
-                for rec in recomendacoes:
-                    with st.expander(f"{rec['Disciplina']} - Deficit: {rec['Deficit']} aulas"):
-                        st.write(f"**Disciplina:** {rec['Disciplina']}")
-                        st.write(f"**Grupo:** {rec['Grupo']}")
-                        st.write(f"**Carga necessária:** {rec['Carga Necessária']} aulas")
-                        st.write(f"**Horas disponíveis:** {rec['Horas Disponível']} aulas")
-                        st.write(f"**Deficit:** {rec['Deficit']} aulas")
-                        st.write(f"**Professores compatíveis:** {rec['Professores Compativeis']}")
-                        st.write(f"**Ação recomendada:** {rec['Ação Recomendada']}")
-                        
-                        # Sugestões de solução
-                        st.info("**Soluções possíveis:**")
-                        st.write("1. Contratar novo professor para esta disciplina")
-                        st.write("2. Aumentar horas disponíveis de professores existentes")
-                        st.write("3. Reduzir carga horária da disciplina nas turmas")
-                        st.write("4. Remover disciplina de algumas turmas")
-            else:
-                st.success("✅ Todas as disciplinas têm cobertura adequada!")
-            
-            # Gráfico de status
-            st.markdown("---")
-            st.subheader("📊 Distribuição por Status")
-            
-            status_counts = df_analise['Status'].value_counts()
-            st.bar_chart(status_counts)
-            
-            # Exportar análise
-            st.markdown("---")
-            st.subheader("💾 Exportar Análise")
-            
-            if st.button("📥 Exportar para CSV"):
-                csv = df_display.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Baixar CSV",
-                    data=csv,
-                    file_name="analise_cobertura.csv",
-                    mime="text/csv"
-                )
-    
-    # ============================================
-    # ABA DISCIPLINAS
-    # ============================================
-    elif menu == "📚 Disciplinas":
-        st.header("📚 Gerenciamento de Disciplinas")
-        
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.subheader("➕ Adicionar Disciplina")
-            
-            with st.form("form_disciplina"):
-                nome = st.text_input("Nome da Disciplina")
-                grupo = st.selectbox("Grupo", ["A", "B", "AMBOS"])
-                carga_semanal = st.number_input("Carga Semanal (aulas de 50min)", 1, 20, 4)
-                
-                # Selecionar turmas
-                turmas_opcoes = [t.nome for t in st.session_state.turmas]
-                turmas_selecionadas = st.multiselect("Turmas", turmas_opcoes)
-                
-                if st.form_submit_button("💾 Salvar Disciplina"):
-                    if nome:
-                        disciplina = Disciplina(
-                            id=st.session_state.proximo_id_disciplina,
-                            nome=nome,
-                            grupo=grupo,
-                            turmas=turmas_selecionadas,
-                            carga_semanal=carga_semanal
-                        )
-                        
-                        st.session_state.disciplinas.append(disciplina)
-                        st.session_state.proximo_id_disciplina += 1
-                        st.success(f"Disciplina {nome} cadastrada!")
-                        st.rerun()
-        
-        with col2:
-            st.subheader("📋 Lista de Disciplinas")
-            
-            if st.session_state.disciplinas:
-                dados_disciplinas = []
-                for disc in st.session_state.disciplinas:
-                    dados_disciplinas.append({
-                        "ID": disc.id,
-                        "Nome": disc.nome,
-                        "Grupo": disc.grupo,
-                        "Carga/Turma": disc.carga_semanal,
-                        "Turmas": len(disc.turmas),
-                        "Carga Total": disc.get_carga_total_necessaria()
-                    })
-                
-                df = pd.DataFrame(dados_disciplinas)
-                st.dataframe(df, use_container_width=True)
-                
-                # Opção de remover
-                disciplinas_nomes = [d.nome for d in st.session_state.disciplinas]
-                disciplina_remover = st.selectbox("Selecionar disciplina para remover", 
-                                                ["Selecione..."] + disciplinas_nomes)
-                
-                if st.button("🗑️ Remover Disciplina", type="secondary"):
-                    if disciplina_remover != "Selecione...":
-                        st.session_state.disciplinas = [d for d in st.session_state.disciplinas 
-                                                      if d.nome != disciplina_remover]
-                        st.success(f"Disciplina {disciplina_remover} removida!")
-                        st.rerun()
-            else:
-                st.info("📭 Nenhuma disciplina cadastrada ainda.")
-    
-    # ============================================
-    # ABA TURMAS
-    # ============================================
-    elif menu == "👥 Turmas":
-        st.header("👥 Gerenciamento de Turmas")
-        
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.subheader("➕ Adicionar Turma")
-            
-            with st.form("form_turma"):
-                nome = st.text_input("Nome da Turma")
-                serie = st.selectbox("Série", ["6º EF", "7º EF", "8º EF", "9º EF", "1º EM", "2º EM", "3º EM"])
-                grupo = st.selectbox("Grupo", ["A", "B", "AMBOS"])
-                turno = st.selectbox("Turno", ["MANHÃ", "TARDE"])
-                
-                if st.form_submit_button("💾 Salvar Turma"):
-                    if nome:
-                        turma = Turma(
-                            id=st.session_state.proximo_id_turma,
-                            nome=nome,
-                            serie=serie,
-                            grupo=grupo,
-                            turno=turno
-                        )
-                        
-                        st.session_state.turmas.append(turma)
-                        st.session_state.proximo_id_turma += 1
-                        st.success(f"Turma {nome} cadastrada!")
-                        st.rerun()
-        
-        with col2:
-            st.subheader("📋 Lista de Turmas")
-            
-            if st.session_state.turmas:
-                dados_turmas = []
-                for turma in st.session_state.turmas:
-                    dados_turmas.append({
-                        "ID": turma.id,
-                        "Nome": turma.nome,
-                        "Série": turma.serie,
-                        "Grupo": turma.grupo,
-                        "Turno": turma.turno
-                    })
-                
-                df = pd.DataFrame(dados_turmas)
-                st.dataframe(df, use_container_width=True)
-                
-                # Opção de remover
-                turmas_nomes = [t.nome for t in st.session_state.turmas]
-                turma_remover = st.selectbox("Selecionar turma para remover", 
-                                           ["Selecione..."] + turmas_nomes)
-                
-                if st.button("🗑️ Remover Turma", type="secondary"):
-                    if turma_remover != "Selecione...":
-                        st.session_state.turmas = [t for t in st.session_state.turmas 
-                                                 if t.nome != turma_remover]
-                        st.success(f"Turma {turma_remover} removida!")
-                        st.rerun()
-            else:
-                st.info("📭 Nenhuma turma cadastrada ainda.")
-    
-    # ============================================
-    # ABA GERAR GRADE
-    # ============================================
-    elif menu == "🗓️ Gerar Grade":
-        st.header("🗓️ Gerar Grade Horária")
-        
-        # Verificar pré-requisitos
-        if not st.session_state.turmas:
-            st.error("❌ Cadastre turmas primeiro!")
-            return
-        if not st.session_state.disciplinas:
-            st.error("❌ Cadastre disciplinas primeiro!")
-            return
-        if not st.session_state.professores:
-            st.error("❌ Cadastre professores primeiro!")
-            return
-        
-        st.subheader("🎯 Configurações da Grade")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            tipo_grade = st.selectbox(
-                "Tipo de Grade",
-                [
-                    "Grade Completa - Todas as Turmas",
-                    "Grade por Grupo A",
-                    "Grade por Grupo B", 
-                    "Grade por Turma Específica"
-                ]
-            )
-            
-            if tipo_grade == "Grade por Turma Específica":
-                turmas_opcoes = [t.nome for t in st.session_state.turmas]
-                if turmas_opcoes:
-                    turma_selecionada = st.selectbox("Selecionar Turma", turmas_opcoes)
-                else:
-                    turma_selecionada = None
-        
-        with col2:
-            tipo_algoritmo = st.selectbox(
-                "Algoritmo de Geração",
-                ["Algoritmo Simples (Rápido)"]
-            )
-            
-            st.info("📅 **EM: 07:00-13:10 (7 períodos de 50min)**")
-            st.info("📅 **EF II: 07:50-14:00 (7 períodos de 50min)**")
-        
-        # Análise de cobertura antes de gerar
-        st.subheader("📊 Análise de Cobertura para Geração")
-        
-        if tipo_grade == "Grade por Grupo A":
-            turmas_filtradas = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == "A"]
-            grupo_texto = "Grupo A"
-        elif tipo_grade == "Grade por Grupo B":
-            turmas_filtradas = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == "B"]
-            grupo_texto = "Grupo B"
-        elif tipo_grade == "Grade por Turma Específica" and turma_selecionada:
-            turmas_filtradas = [t for t in st.session_state.turmas if t.nome == turma_selecionada]
-            grupo_texto = f"Turma {turma_selecionada}"
-        else:
-            turmas_filtradas = st.session_state.turmas
-            grupo_texto = "Todas as Turmas"
-        
-        if tipo_grade == "Grade por Grupo A":
-            disciplinas_filtradas = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == "A"]
-        elif tipo_grade == "Grade por Grupo B":
-            disciplinas_filtradas = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == "B"]
-        else:
-            disciplinas_filtradas = st.session_state.disciplinas
-        
-        # Análise de viabilidade
-        total_aulas = 0
-        aulas_por_turma = {}
-        problemas_carga = []
-        
-        for turma in turmas_filtradas:
-            aulas_turma = 0
-            grupo_turma = obter_grupo_seguro(turma)
-            
-            for disc in disciplinas_filtradas:
-                disc_grupo = obter_grupo_seguro(disc)
-                if turma.nome in disc.turmas and disc_grupo == grupo_turma:
-                    aulas_turma += disc.carga_semanal
-                    total_aulas += disc.carga_semanal
-            
-            aulas_por_turma[turma.nome] = aulas_turma
-            
-            carga_maxima = calcular_carga_maxima(turma.serie)
-            if aulas_turma != carga_maxima:
-                status = "✅" if aulas_turma == carga_maxima else "⚠️" if aulas_turma <= carga_maxima else "❌"
-                problemas_carga.append(f"{turma.nome} [{grupo_turma}]: {aulas_turma}h {status} {carga_maxima}h máximo")
-        
-        capacidade_total = 0
-        for turma in turmas_filtradas:
-            horarios_turma = obter_horarios_turma(turma.nome)
-            capacidade_total += len(DIAS_SEMANA) * len(horarios_turma)
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Turmas", len(turmas_filtradas))
-        with col2:
-            st.metric("Aulas Necessárias", total_aulas)
-        with col3:
-            st.metric("Capacidade Disponível", capacidade_total)
-        
-        if problemas_carga:
-            st.warning("⚠️ Observações sobre carga horária:")
-            for problema in problemas_carga:
-                st.write(f"- {problema}")
-        
-        # Análise de cobertura específica
-        st.subheader("👨‍🏫 Análise de Cobertura de Professores")
-        
-        # Verificar cobertura para as disciplinas filtradas
-        cobertura_problemas = []
-        for disc in disciplinas_filtradas:
-            carga_total = disc.get_carga_total_necessaria()
-            horas_disponiveis = 0
-            
-            for professor in st.session_state.professores:
-                horas_prof = professor.get_horas_disponiveis(disc.nome)
-                if horas_prof > 0:
-                    # Verificar compatibilidade de grupo
-                    prof_grupo = professor.grupo
-                    disc_grupo = disc.grupo
-                    
-                    if (prof_grupo == disc_grupo or 
-                        prof_grupo == 'AMBOS' or 
-                        disc_grupo == 'AMBOS'):
-                        horas_disponiveis += horas_prof
-            
-            if horas_disponiveis < carga_total:
-                deficit = carga_total - horas_disponiveis
-                cobertura_problemas.append({
-                    'disciplina': disc.nome,
-                    'carga_total': carga_total,
-                    'horas_disponiveis': horas_disponiveis,
-                    'deficit': deficit
+    for item_nome in marketing_itens_selecionados:
+        for item in CATEGORIAS_CUSTOS['marketing']['itens']:
+            if item['nome'] == item_nome:
+                custo_marketing += item['custo_base']
+                detalhes_marketing.append({
+                    'item': item_nome,
+                    'valor': item['custo_base'],
+                    'descricao': item.get('descricao', '')
                 })
-        
-        if cobertura_problemas:
-            st.error("❌ Problemas de cobertura detectados:")
-            for problema in cobertura_problemas:
-                st.write(f"- **{problema['disciplina']}**: {problema['deficit']} aulas em deficit "
-                        f"({problema['horas_disponiveis']}/{problema['carga_total']})")
-            
-            st.warning("⚠️ Geração de grade pode resultar em aulas sem professor!")
-        else:
-            st.success("✅ Todas as disciplinas têm cobertura adequada!")
-        
-        if total_aulas == 0:
-            st.error("❌ Nenhuma aula para alocar! Verifique as disciplinas.")
-        elif total_aulas > capacidade_total:
-            st.error("❌ Capacidade insuficiente! Reduza a carga horária.")
-        else:
-            st.success("✅ Pronto para gerar grade!")
-            
-            nome_grade = st.text_input("Nome da Grade", value=f"Grade {grupo_texto}")
-            
-            if st.button("🚀 Gerar Grade Horária", type="primary", use_container_width=True):
-                if not turmas_filtradas:
-                    st.error("❌ Nenhuma turma selecionada!")
-                elif not disciplinas_filtradas:
-                    st.error("❌ Nenhuma disciplina disponível!")
-                else:
-                    with st.spinner(f"Gerando grade para {grupo_texto}..."):
-                        try:
-                            # Filtrar professores
-                            if tipo_grade == "Grade por Grupo A":
-                                professores_filtrados = [p for p in st.session_state.professores 
-                                                       if obter_grupo_seguro(p) in ["A", "AMBOS"]]
-                            elif tipo_grade == "Grade por Grupo B":
-                                professores_filtrados = [p for p in st.session_state.professores 
-                                                       if obter_grupo_seguro(p) in ["B", "AMBOS"]]
-                            else:
-                                professores_filtrados = st.session_state.professores
-                            
-                            # Gerar grade
-                            gerador = GeradorGrade(turmas_filtradas, disciplinas_filtradas, professores_filtrados)
-                            aulas_alocadas, aulas_por_turma_dict = gerador.gerar_grade_simples()
-                            
-                            conflitos = gerador.verificar_conflitos()
-                            st.session_state.proximo_id_aula = gerador.proximo_id_aula
-                            
-                            # Criar objeto Grade
-                            grade = Grade(
-                                id=st.session_state.proximo_id_grade,
-                                nome=nome_grade,
-                                turmas=[t.nome for t in turmas_filtradas],
-                                grupo=grupo_texto,
-                                aulas=aulas_alocadas,
-                                status="GERADA"
-                            )
-                            
-                            st.session_state.grades.append(grade)
-                            st.session_state.proximo_id_grade += 1
-                            
-                            # Mostrar resultados
-                            st.success(f"✅ Grade gerada com sucesso!")
-                            
-                            # Relatório de utilização
-                            st.subheader("📊 Relatório de Utilização")
-                            relatorio = gerador.gerar_relatorio_utilizacao()
-                            
-                            if relatorio:
-                                df_relatorio = pd.DataFrame(relatorio)
-                                st.dataframe(df_relatorio, use_container_width=True)
-                            
-                            st.info(f"📊 Estatísticas da grade:")
-                            st.write(f"- Total de aulas alocadas: {len(aulas_alocadas)}")
-                            st.write(f"- Conflitos detectados: {conflitos}")
-                            st.write(f"- Turmas na grade: {len(turmas_filtradas)}")
-                            
-                            # Contar aulas sem professor
-                            aulas_sem_professor = sum(1 for a in aulas_alocadas if a.professor == "")
-                            if aulas_sem_professor > 0:
-                                st.warning(f"⚠️ {aulas_sem_professor} aulas sem professor alocado")
-                            
-                            # Mostrar grade visual para primeira turma
-                            if turmas_filtradas:
-                                primeira_turma = turmas_filtradas[0].nome
-                                if primeira_turma in st.session_state.aulas_por_turma:
-                                    mostrar_grade_visual(primeira_turma, st.session_state.aulas_por_turma[primeira_turma])
-                            
-                            # Mostrar preview
-                            st.subheader("👁️ Preview da Grade")
-                            if aulas_alocadas:
-                                dados_preview = []
-                                for aula in aulas_alocadas[:20]:  # Mostrar primeiras 20 aulas
-                                    dados_preview.append({
-                                        "Turma": aula.turma,
-                                        "Disciplina": aula.disciplina,
-                                        "Professor": aula.professor,
-                                        "Dia": aula.dia,
-                                        "Horário": aula.horario,
-                                        "Período": aula.periodo
-                                    })
-                                
-                                df_preview = pd.DataFrame(dados_preview)
-                                st.dataframe(df_preview, use_container_width=True)
-                                
-                                if len(aulas_alocadas) > 20:
-                                    st.caption(f"Mostrando 20 de {len(aulas_alocadas)} aulas")
-                            
-                        except Exception as e:
-                            st.error(f"❌ Erro ao gerar grade: {str(e)}")
+                break
     
-    # ============================================
-    # ABA VISUALIZAR GRADES
-    # ============================================
-    elif menu == "📋 Visualizar Grades":
-        st.header("📋 Grades Geradas")
+    if not detalhes_marketing:
+        custo_marketing = dados_entrada.get('custo_marketing', 800)
+        detalhes_marketing.append({
+            'item': 'Divulgação básica',
+            'valor': custo_marketing,
+            'descricao': 'Campanha inicial de divulgação'
+        })
+    
+    custos_detalhados['categorias']['marketing'] = {
+        'total': custo_marketing,
+        'detalhes': detalhes_marketing
+    }
+    
+    # 5. CUSTOS COM RECURSOS HUMANOS
+    rh_itens_selecionados = dados_entrada.get('rh_itens_selecionados', [])
+    custo_rh = 0
+    detalhes_rh = []
+    
+    for item_nome in rh_itens_selecionados:
+        for item in CATEGORIAS_CUSTOS['recursos_humanos']['itens']:
+            if item['nome'] == item_nome:
+                custo_rh += item['custo_base']
+                detalhes_rh.append({
+                    'item': item_nome,
+                    'valor': item['custo_base'],
+                    'descricao': item.get('descricao', '')
+                })
+                break
+    
+    if not detalhes_rh:
+        custo_rh = 5000  # Valor padrão
+        detalhes_rh.append({
+            'item': 'Treinamento básico',
+            'valor': custo_rh,
+            'descricao': 'Capacitação inicial da equipe'
+        })
+    
+    custos_detalhados['categorias']['recursos_humanos'] = {
+        'total': custo_rh,
+        'detalhes': detalhes_rh
+    }
+    
+    # 6. OUTROS CUSTOS
+    outros_custos = dados_entrada.get('outros_custos', 200)
+    custos_detalhados['categorias']['outros'] = {
+        'total': outros_custos,
+        'detalhes': [{'item': 'Custos diversos', 'valor': outros_custos}]
+    }
+    
+    # Resumo geral
+    investimento_total = sum([cat['total'] for cat in custos_detalhados['categorias'].values()])
+    
+    custos_detalhados['resumo'] = {
+        'investimento_total': investimento_total,
+        'professores_necessarios': professores_necessarios,
+        'custo_medio_por_aluno': investimento_total / total_alunos_projetado if total_alunos_projetado > 0 else 0,
+        'custo_medio_por_atividade': investimento_total / num_atividades if num_atividades > 0 else 0
+    }
+    
+    return custos_detalhados
+
+def calcular_projecao(dados_entrada, custos_detalhados):
+    """Calcula todas as projeções baseadas nos dados inseridos"""
+    
+    alunos_atuais = dados_entrada.get('alunos_atuais', 0)
+    mensalidade = dados_entrada.get('mensalidade_media', 0)
+    aumento_percentual = dados_entrada.get('aumento_esperado', 0) / 100
+    
+    # Cálculo de novos alunos
+    novos_alunos = int(alunos_atuais * aumento_percentual)
+    
+    # Receitas
+    receita_atual = alunos_atuais * mensalidade
+    receita_projetada = (alunos_atuais + novos_alunos) * mensalidade
+    
+    # Custos do investimento
+    investimento_total = custos_detalhados['resumo']['investimento_total']
+    
+    # Retorno mensal adicional
+    retorno_mensal = novos_alunos * mensalidade
+    
+    # Cálculo de payback e ROI
+    if retorno_mensal > 0:
+        payback_meses = investimento_total / retorno_mensal
+    else:
+        payback_meses = 0
         
-        if not st.session_state.grades:
-            st.info("📭 Nenhuma grade gerada ainda.")
-        else:
-            # Lista de grades disponíveis
-            grades_opcoes = [g.nome for g in st.session_state.grades]
-            grade_selecionada = st.selectbox("Selecionar Grade para Visualizar", grades_opcoes)
-            
-            if grade_selecionada:
-                grade = next((g for g in st.session_state.grades if g.nome == grade_selecionada), None)
+    if investimento_total > 0:
+        roi_percentual = (retorno_mensal * 12 / investimento_total) * 100
+    else:
+        roi_percentual = 0
+    
+    return {
+        'novos_alunos': novos_alunos,
+        'receita_atual': receita_atual,
+        'receita_projetada': receita_projetada,
+        'investimento_total': investimento_total,
+        'retorno_mensal': retorno_mensal,
+        'payback_meses': payback_meses,
+        'roi_percentual': roi_percentual,
+        'professores_necessarios': custos_detalhados['resumo']['professores_necessarios'],
+        'custo_medio_por_aluno': custos_detalhados['resumo']['custo_medio_por_aluno'],
+        'custo_medio_por_atividade': custos_detalhados['resumo']['custo_medio_por_atividade']
+    }
+
+# Templates HTML inline
+def get_base_html(title="Business Plan Escolar", content=""):
+    """Retorna o HTML base para todas as páginas"""
+    return f'''<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {{
+            --primary-color: #4361ee;
+            --secondary-color: #3a0ca3;
+            --success-color: #4cc9f0;
+            --infantil-color: #FF6B8B;
+            --fundamental-color: #4ECDC4;
+            --medio-color: #45B7D1;
+        }}
+        body {{
+            background-color: #f5f7fb;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+        }}
+        .navbar-brand {{
+            font-weight: 700;
+            font-size: 1.5rem;
+        }}
+        .card {{
+            border-radius: 10px;
+            border: none;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }}
+        .card-header {{
+            border-radius: 10px 10px 0 0 !important;
+            font-weight: 600;
+        }}
+        .btn-primary {{
+            background-color: var(--primary-color);
+            border-color: var(--primary-color);
+        }}
+        .btn-primary:hover {{
+            background-color: var(--secondary-color);
+            border-color: var(--secondary-color);
+        }}
+        .nivel-infantil {{ border-left: 5px solid var(--infantil-color) !important; }}
+        .nivel-fundamental {{ border-left: 5px solid var(--fundamental-color) !important; }}
+        .nivel-medio {{ border-left: 5px solid var(--medio-color) !important; }}
+        
+        .costo-item {{
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }}
+        .costo-item:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }}
+        .costo-seleccionado {{
+            background-color: #e8f4fd !important;
+            border-color: var(--primary-color) !important;
+        }}
+        
+        .hero-section {{
+            background: linear-gradient(135deg, #4361ee 0%, #3a0ca3 100%);
+            color: white;
+            padding: 40px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+        }}
+        
+        .badge-nivel {{
+            font-size: 0.8em;
+            padding: 5px 10px;
+            border-radius: 20px;
+        }}
+        .badge-infantil {{ background-color: var(--infantil-color); }}
+        .badge-fundamental {{ background-color: var(--fundamental-color); }}
+        .badge-medio {{ background-color: var(--medio-color); }}
+        
+        footer {{
+            background-color: #2c3e50;
+            color: white;
+            padding: 20px 0;
+            margin-top: 40px;
+        }}
+        
+        .sticky-summary {{
+            position: sticky;
+            top: 20px;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }}
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-chart-line"></i> Business Plan Escolar
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">Início</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/simulacao">Nova Simulação</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/dashboard">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/info">
+                            <i class="fas fa-info-circle"></i> Info
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        {content}
+    </div>
+
+    <footer class="bg-dark text-white mt-5">
+        <div class="container text-center">
+            <p>Sistema de Business Plan para Escolas - Análise detalhada de custos por nível escolar</p>
+            <p class="mb-0">© 2024 - Desenvolvido com Python, Flask e SQLite</p>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>'''
+
+# Rotas da aplicação
+@app.route('/')
+def index():
+    content = '''
+    <div class="row">
+        <div class="col-lg-8 mx-auto text-center">
+            <div class="hero-section">
+                <h1 class="display-4 mb-4">
+                    <i class="fas fa-school"></i> Sistema de Business Plan Escolar
+                </h1>
+                <p class="lead mb-4">
+                    Ferramenta avançada para análise de custo-benefício com <strong>custos específicos por nível escolar</strong>
+                    visando aumentar em <strong>30% a 50%</strong> o número de matrículas.
+                </p>
+                <div class="row mt-5">
+                    <div class="col-md-3">
+                        <div class="card mb-4 border-primary">
+                            <div class="card-body">
+                                <i class="fas fa-baby fa-3x text-primary mb-3"></i>
+                                <h4>Educação Infantil</h4>
+                                <p>Custos específicos para berçário ao infantil</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card mb-4 border-success">
+                            <div class="card-body">
+                                <i class="fas fa-graduation-cap fa-3x text-success mb-3"></i>
+                                <h4>Fundamental I</h4>
+                                <p>Anos iniciais do ensino fundamental</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card mb-4 border-info">
+                            <div class="card-body">
+                                <i class="fas fa-book fa-3x text-info mb-3"></i>
+                                <h4>Fundamental II</h4>
+                                <p>Anos finais do ensino fundamental</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card mb-4 border-warning">
+                            <div class="card-body">
+                                <i class="fas fa-university fa-3x text-warning mb-3"></i>
+                                <h4>Ensino Médio</h4>
+                                <p>Preparação para vestibular e ENEM</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 
-                if grade:
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Nome", grade.nome)
-                    with col2:
-                        st.metric("Status", grade.status)
-                    with col3:
-                        st.metric("Total Aulas", len(grade.aulas))
-                    
-                    st.write(f"**Turmas:** {', '.join(grade.turmas)}")
-                    st.write(f"**Grupo:** {grade.grupo}")
-                    
-                    # Contar aulas sem professor
-                    aulas_sem_prof = sum(1 for a in grade.aulas if a.professor == "" or a.professor == "SEM PROFESSOR")
-                    if aulas_sem_prof > 0:
-                        st.warning(f"⚠️ {aulas_sem_prof} aulas sem professor alocado")
-                    
-                    # Filtrar por turma
-                    turmas_grade = list(set([a.turma for a in grade.aulas]))
-                    turma_filtro = st.selectbox("Filtrar por Turma", ["Todas"] + turmas_grade)
-                    
-                    # Filtrar aulas
-                    if turma_filtro == "Todas":
-                        aulas_filtradas = grade.aulas
-                    else:
-                        aulas_filtradas = [a for a in grade.aulas if a.turma == turma_filtro]
-                    
-                    # Converter para DataFrame
-                    if aulas_filtradas:
-                        dados_aulas = []
-                        for aula in aulas_filtradas:
-                            dados_aulas.append({
-                                "Turma": aula.turma,
-                                "Disciplina": aula.disciplina,
-                                "Professor": aula.professor,
-                                "Dia": aula.dia,
-                                "Horário": aula.horario,
-                                "Período": aula.periodo
-                            })
-                        
-                        df = pd.DataFrame(dados_aulas)
-                        
-                        # Ordenar
-                        ordem_dias = {dia: i for i, dia in enumerate(DIAS_SEMANA)}
-                        df['Ordem_Dia'] = df['Dia'].map(ordem_dias)
-                        df = df.sort_values(['Turma', 'Ordem_Dia', 'Período'])
-                        df = df.drop('Ordem_Dia', axis=1)
-                        
-                        st.dataframe(df, use_container_width=True)
-                        
-                        # Botão para visualizar grade
-                        if turma_filtro != "Todas" and turma_filtro in st.session_state.aulas_por_turma:
-                            if st.button("📊 Visualizar Grade da Turma"):
-                                mostrar_grade_visual(turma_filtro, st.session_state.aulas_por_turma[turma_filtro])
-                        
-                        # Opção de exportar
-                        st.subheader("💾 Exportar Grade")
-                        
-                        col_exp1, col_exp2 = st.columns(2)
-                        with col_exp1:
-                            if st.button("📥 Exportar para Excel"):
-                                excel_data = exportar_grade_excel(grade)
-                                if excel_data:
-                                    st.download_button(
-                                        label="Baixar Excel",
-                                        data=excel_data,
-                                        file_name=f"grade_{grade.nome}.xlsx",
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                    )
-                        
-                        with col_exp2:
-                            if st.button("🗑️ Excluir Grade"):
-                                if st.checkbox("Confirmar exclusão"):
-                                    st.session_state.grades = [g for g in st.session_state.grades if g.id != grade.id]
-                                    st.success(f"Grade {grade.nome} excluída!")
-                                    st.rerun()
-                    else:
-                        st.warning(f"Nenhuma aula encontrada para o filtro selecionado.")
+                <a href="/simulacao" class="btn btn-primary btn-lg mt-4">
+                    <i class="fas fa-play-circle"></i> Iniciar Nova Simulação
+                </a>
+            </div>
+        </div>
+    </div>
 
-# ============================================
-# EXECUÇÃO
-# ============================================
+    <div class="row mt-5">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-info text-white">
+                    <h4><i class="fas fa-bullseye"></i> Novas Funcionalidades</h4>
+                </div>
+                <div class="card-body">
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item">
+                            <i class="fas fa-check-circle text-success"></i>
+                            <strong>Custos por nível escolar</strong> - Infantil, Fundamental I/II, Médio
+                        </li>
+                        <li class="list-group-item">
+                            <i class="fas fa-check-circle text-success"></i>
+                            <strong>Seleção de atividades específicas</strong> por nível
+                        </li>
+                        <li class="list-group-item">
+                            <i class="fas fa-check-circle text-success"></i>
+                            <strong>Custos detalhados por categoria</strong> - Infraestrutura, Material, etc.
+                        </li>
+                        <li class="list-group-item">
+                            <i class="fas fa-check-circle text-success"></i>
+                            <strong>Cálculo automático de professores</strong> necessários
+                        </li>
+                        <li class="list-group-item">
+                            <i class="fas fa-check-circle text-success"></i>
+                            <strong>Seleção de itens de custo</strong> personalizável
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-success text-white">
+                    <h4><i class="fas fa-chart-pie"></i> Análise Detalhada de Custos</h4>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-success">
+                        <strong>Infraestrutura específica:</strong> Brinquedoteca, laboratórios, quadras
+                    </div>
+                    <div class="alert alert-info">
+                        <strong>Materiais por aluno:</strong> Kits de atividades, uniformes, livros
+                    </div>
+                    <div class="alert alert-warning">
+                        <strong>Recursos humanos:</strong> Professores especializados, capacitação
+                    </div>
+                    <div class="alert alert-primary">
+                        <strong>Marketing segmentado:</strong> Divulgação por público-alvo
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
+    return get_base_html("Business Plan Escolar - Início", content)
 
-if __name__ == "__main__":
-    main()
+@app.route('/simulacao')
+def simulacao():
+    # Gerar opções de atividades por nível
+    atividades_options = ""
+    for nivel, config in CUSTOS_POR_NIVEL.items():
+        atividades_options += f'<optgroup label="{nivel.replace("_", " ").title()}">'
+        for atividade in config['atividades_especificas']:
+            atividades_options += f'<option value="{atividade}">{atividade}</option>'
+        atividades_options += '</optgroup>'
+    
+    # Gerar opções de infraestrutura
+    infra_options = ""
+    for item in CATEGORIAS_CUSTOS['infraestrutura']['itens']:
+        infra_options += f'''
+        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'infra')">
+            <input class="form-check-input" type="checkbox" name="infra_itens" value="{item['nome']}" id="infra_{item['nome'].replace(' ', '_')}">
+            <label class="form-check-label" for="infra_{item['nome'].replace(' ', '_')}">
+                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}
+                <small class="d-block text-muted">{item.get('descricao', '')}</small>
+            </label>
+        </div>
+        '''
+    
+    # Gerar opções de material
+    material_options = ""
+    for item in CATEGORIAS_CUSTOS['material']['itens']:
+        por_aluno = " (por aluno)" if item.get('por_aluno', False) else ""
+        material_options += f'''
+        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'material')">
+            <input class="form-check-input" type="checkbox" name="material_itens" value="{item['nome']}" id="material_{item['nome'].replace(' ', '_')}">
+            <label class="form-check-label" for="material_{item['nome'].replace(' ', '_')}">
+                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}{por_aluno}
+            </label>
+        </div>
+        '''
+    
+    # Gerar opções de marketing
+    marketing_options = ""
+    for item in CATEGORIAS_CUSTOS['marketing']['itens']:
+        marketing_options += f'''
+        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'marketing')">
+            <input class="form-check-input" type="checkbox" name="marketing_itens" value="{item['nome']}" id="marketing_{item['nome'].replace(' ', '_')}">
+            <label class="form-check-label" for="marketing_{item['nome'].replace(' ', '_')}">
+                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}
+                <small class="d-block text-muted">{item.get('descricao', '')}</small>
+            </label>
+        </div>
+        '''
+    
+    # Gerar opções de RH
+    rh_options = ""
+    for item in CATEGORIAS_CUSTOS['recursos_humanos']['itens']:
+        rh_options += f'''
+        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'rh')">
+            <input class="form-check-input" type="checkbox" name="rh_itens" value="{item['nome']}" id="rh_{item['nome'].replace(' ', '_')}">
+            <label class="form-check-label" for="rh_{item['nome'].replace(' ', '_')}">
+                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}
+                <small class="d-block text-muted">{item.get('descricao', '')}</small>
+            </label>
+        </div>
+        '''
+    
+    content = f'''
+    <div class="row">
+        <div class="col-lg-10 mx-auto">
+            <div class="card shadow">
+                <div class="card-header bg-primary text-white">
+                    <h3 class="mb-0"><i class="fas fa-calculator"></i> Simulação Detalhada de Business Plan</h3>
+                    <p class="mb-0">Configure os custos específicos por nível escolar e atividades</p>
+                </div>
+                <div class="card-body">
+                    <form id="simulacaoForm">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-school"></i> Dados da Escola
+                                </h4>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Nível Escolar:</label>
+                                    <select class="form-select" id="nivel_escolar" onchange="atualizarCustosPorNivel()" required>
+                                        <option value="infantil">Educação Infantil</option>
+                                        <option value="fundamental_i" selected>Ensino Fundamental I (1º ao 5º ano)</option>
+                                        <option value="fundamental_ii">Ensino Fundamental II (6º ao 9º ano)</option>
+                                        <option value="medio">Ensino Médio</option>
+                                    </select>
+                                    <div class="form-text">Selecione o nível escolar para cálculos específicos</div>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Número atual de alunos:</label>
+                                    <input type="number" class="form-control" id="alunos_atuais" 
+                                           value="200" min="1" required>
+                                    <div class="form-text">Total de alunos matriculados atualmente</div>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Mensalidade média (R$):</label>
+                                    <input type="number" class="form-control" id="mensalidade_media" 
+                                           value="800" min="100" step="50" required>
+                                    <div class="form-text">Valor médio da mensalidade por aluno</div>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Aumento esperado de matrículas:</label>
+                                    <div class="input-group">
+                                        <input type="range" class="form-range" id="aumento_esperado_range" 
+                                               min="30" max="50" step="5" value="40">
+                                        <span class="input-group-text w-25" id="aumento_esperado_value">40%</span>
+                                    </div>
+                                    <div class="form-text">Meta: 30% a 50% (recomendado pela gestão)</div>
+                                    <input type="hidden" id="aumento_esperado" value="40">
+                                </div>
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-chalkboard-teacher"></i> Atividades Extracurriculares
+                                </h4>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Selecione as atividades:</label>
+                                    <select class="form-select" id="atividades_selecionadas" multiple size="6">
+                                        {atividades_options}
+                                    </select>
+                                    <div class="form-text">Pressione Ctrl para selecionar múltiplas atividades</div>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Horas semanais por atividade:</label>
+                                    <input type="number" class="form-control" id="horas_semanais" 
+                                           value="10" min="5" step="1">
+                                    <div class="form-text">Horas totais de atividades por semana</div>
+                                </div>
+                                
+                                <div class="alert alert-info">
+                                    <i class="fas fa-info-circle"></i>
+                                    <strong>Dicas:</strong>
+                                    <ul class="mb-0 mt-2">
+                                        <li>Infantil: Recomendado 2-3 atividades</li>
+                                        <li>Fundamental: Recomendado 3-4 atividades</li>
+                                        <li>Médio: Recomendado 4-5 atividades</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-4">
+                            <div class="col-12">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-tools"></i> Custos de Infraestrutura
+                                </h4>
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        {infra_options}
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="card">
+                                            <div class="card-body">
+                                                <h6><i class="fas fa-lightbulb"></i> Recomendações por Nível</h6>
+                                                <div id="recomendacoes_infra">
+                                                    <p class="mb-2"><strong>Infantil:</strong> Brinquedoteca, Parque infantil</p>
+                                                    <p class="mb-2"><strong>Fundamental:</strong> Laboratório, Quadra</p>
+                                                    <p class="mb-2"><strong>Médio:</strong> Laboratório avançado, Estúdio</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-4">
+                            <div class="col-md-6">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-book"></i> Materiais e Equipamentos
+                                </h4>
+                                {material_options}
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-bullhorn"></i> Marketing e Divulgação
+                                </h4>
+                                {marketing_options}
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-4">
+                            <div class="col-md-6">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-users"></i> Recursos Humanos
+                                </h4>
+                                {rh_options}
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-calculator"></i> Resumo de Custos
+                                </h4>
+                                <div class="sticky-summary">
+                                    <h5>Estimativa de Investimento</h5>
+                                    <div id="resumo_custos">
+                                        <p>Selecione itens para ver a estimativa</p>
+                                    </div>
+                                    <div class="mt-3">
+                                        <div class="mb-3">
+                                            <label class="form-label">Outros custos (R$):</label>
+                                            <input type="number" class="form-control" id="outros_custos" 
+                                                   value="200" min="0" step="50">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-4">
+                            <div class="col-12 text-center">
+                                <button type="button" class="btn btn-primary btn-lg" 
+                                        onclick="calcularSimulacao()" id="btnCalcular">
+                                    <i class="fas fa-calculator"></i> Calcular Projeção Detalhada
+                                </button>
+                                <button type="button" class="btn btn-secondary btn-lg ms-2" onclick="resetForm()">
+                                    <i class="fas fa-redo"></i> Limpar Tudo
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                    
+                    <div class="row mt-5">
+                        <div class="col-12">
+                            <div id="resultado" style="display: none;">
+                                <!-- Resultados serão inseridos aqui via JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {{
+        // Configurar eventos
+        document.getElementById('alunos_atuais').addEventListener('input', atualizarResumo);
+        document.getElementById('mensalidade_media').addEventListener('input', atualizarResumo);
+        document.getElementById('aumento_esperado_range').addEventListener('input', function() {{
+            document.getElementById('aumento_esperado_value').textContent = this.value + '%';
+            document.getElementById('aumento_esperado').value = this.value;
+            atualizarResumo();
+        }});
+        
+        // Configurar seleção de itens de custo
+        document.querySelectorAll('.costo-item input[type="checkbox"]').forEach(checkbox => {{
+            checkbox.addEventListener('change', atualizarResumo);
+        }});
+        
+        atualizarResumo();
+    }});
+    
+    function toggleCostoItem(element, tipo) {{
+        const checkbox = element.querySelector('input[type="checkbox"]');
+        checkbox.checked = !checkbox.checked;
+        element.classList.toggle('costo-seleccionado', checkbox.checked);
+        atualizarResumo();
+    }}
+    
+    function atualizarCustosPorNivel() {{
+        const nivel = document.getElementById('nivel_escolar').value;
+        let recomendacoes = '';
+        
+        switch(nivel) {{
+            case 'infantil':
+                recomendacoes = '<p class="mb-2"><strong>Infantil:</strong> Brinquedoteca, Parque infantil, Sala multiuso</p>';
+                break;
+            case 'fundamental_i':
+                recomendacoes = '<p class="mb-2"><strong>Fundamental I:</strong> Laboratório de informática, Quadra, Biblioteca</p>';
+                break;
+            case 'fundamental_ii':
+                recomendacoes = '<p class="mb-2"><strong>Fundamental II:</strong> Laboratório de ciências, Estúdio de música, Sala de estudos</p>';
+                break;
+            case 'medio':
+                recomendacoes = '<p class="mb-2"><strong>Médio:</strong> Laboratório avançado, Sala de projeção, Espaço coworking</p>';
+                break;
+        }}
+        
+        document.getElementById('recomendacoes_infra').innerHTML = recomendacoes;
+        atualizarResumo();
+    }}
+    
+    function atualizarResumo() {{
+        const alunos = parseInt(document.getElementById('alunos_atuais').value) || 0;
+        const mensalidade = parseFloat(document.getElementById('mensalidade_media').value) || 0;
+        const aumento = parseInt(document.getElementById('aumento_esperado').value) || 0;
+        const nivel = document.getElementById('nivel_escolar').value;
+        
+        // Calcular novos alunos
+        const novosAlunos = Math.round(alunos * (aumento / 100));
+        const totalAlunos = alunos + novosAlunos;
+        
+        // Calcular custos selecionados
+        let custoTotal = 0;
+        const custosDetalhados = {{}};
+        
+        // Infraestrutura
+        const infraSelecionados = Array.from(document.querySelectorAll('input[name="infra_itens"]:checked'))
+            .map(cb => cb.value);
+        
+        // Material (ajustar por aluno se necessário)
+        const materialSelecionados = Array.from(document.querySelectorAll('input[name="material_itens"]:checked'))
+            .map(cb => cb.value);
+        
+        // Marketing
+        const marketingSelecionados = Array.from(document.querySelectorAll('input[name="marketing_itens"]:checked'))
+            .map(cb => cb.value);
+        
+        // RH
+        const rhSelecionados = Array.from(document.querySelectorAll('input[name="rh_itens"]:checked'))
+            .map(cb => cb.value);
+        
+        // Outros custos
+        const outrosCustos = parseFloat(document.getElementById('outros_custos').value) || 0;
+        
+        // Atividades selecionadas
+        const atividadesSelect = document.getElementById('atividades_selecionadas');
+        const atividadesSelecionadas = Array.from(atividadesSelect.selectedOptions).map(opt => opt.value);
+        
+        // Atualizar resumo
+        let resumoHTML = `
+            <table class="table table-sm">
+                <tr>
+                    <td>Alunos atuais:</td>
+                    <td class="text-end"><strong>${{alunos}}</strong></td>
+                </tr>
+                <tr>
+                    <td>Novos alunos projetados:</td>
+                    <td class="text-end text-success"><strong>+${{novosAlunos}}</strong></td>
+                </tr>
+                <tr>
+                    <td>Total projetado:</td>
+                    <td class="text-end"><strong>${{totalAlunos}}</strong></td>
+                </tr>
+                <tr>
+                    <td>Aumento:</td>
+                    <td class="text-end"><strong>${{aumento}}%</strong></td>
+                </tr>
+                <tr class="table-secondary">
+                    <td>Nível escolar:</td>
+                    <td class="text-end"><span class="badge badge-${{nivel}}">${{nivel.replace('_', ' ').toUpperCase()}}</span></td>
+                </tr>
+                <tr class="table-secondary">
+                    <td>Atividades selecionadas:</td>
+                    <td class="text-end"><strong>${{atividadesSelecionadas.length}}</strong></td>
+                </tr>
+            </table>
+            
+            <div class="alert alert-info mt-3">
+                <i class="fas fa-calculator"></i> 
+                <strong>Receita adicional mensal estimada:</strong> 
+                <span class="float-end">R$ ${{(novosAlunos * mensalidade).toLocaleString('pt-BR')}}</span>
+            </div>
+        `;
+        
+        document.getElementById('resumo_custos').innerHTML = resumoHTML;
+    }}
+    
+    function resetForm() {{
+        document.getElementById('simulacaoForm').reset();
+        document.querySelectorAll('.costo-item').forEach(item => {{
+            item.classList.remove('costo-seleccionado');
+        }});
+        atualizarResumo();
+    }}
+    
+    async function calcularSimulacao() {{
+        const btn = document.getElementById('btnCalcular');
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Calculando...';
+        btn.disabled = true;
+        
+        try {{
+            // Coletar dados do formulário
+            const atividadesSelect = document.getElementById('atividades_selecionadas');
+            const atividadesSelecionadas = Array.from(atividadesSelect.selectedOptions).map(opt => opt.value);
+            
+            const infraSelecionados = Array.from(document.querySelectorAll('input[name="infra_itens"]:checked'))
+                .map(cb => cb.value);
+            
+            const materialSelecionados = Array.from(document.querySelectorAll('input[name="material_itens"]:checked'))
+                .map(cb => cb.value);
+            
+            const marketingSelecionados = Array.from(document.querySelectorAll('input[name="marketing_itens"]:checked'))
+                .map(cb => cb.value);
+            
+            const rhSelecionados = Array.from(document.querySelectorAll('input[name="rh_itens"]:checked'))
+                .map(cb => cb.value);
+            
+            const dados = {{
+                alunos_atuais: parseInt(document.getElementById('alunos_atuais').value),
+                mensalidade_media: parseFloat(document.getElementById('mensalidade_media').value),
+                aumento_esperado: parseInt(document.getElementById('aumento_esperado').value),
+                nivel_escolar: document.getElementById('nivel_escolar').value,
+                atividades_selecionadas: atividadesSelecionadas,
+                infra_itens_selecionados: infraSelecionados,
+                material_itens_selecionados: materialSelecionados,
+                marketing_itens_selecionados: marketingSelecionados,
+                rh_itens_selecionados: rhSelecionados,
+                horas_semanais: parseInt(document.getElementById('horas_semanais').value) || 10,
+                outros_custos: parseFloat(document.getElementById('outros_custos').value) || 0
+            }};
+            
+            const response = await fetch('/calcular', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json'
+                }},
+                body: JSON.stringify(dados)
+            }});
+            
+            const resultados = await response.json();
+            
+            if (response.ok) {{
+                mostrarResultados(resultados);
+                // Redirecionar para resultado após cálculo
+                setTimeout(() => {{
+                    window.location.href = '/resultado';
+                }}, 1500);
+            }} else {{
+                alert('Erro: ' + (resultados.error || 'Desconhecido'));
+            }}
+        }} catch (error) {{
+            alert('Erro ao calcular: ' + error.message);
+        }} finally {{
+            btn.innerHTML = '<i class="fas fa-calculator"></i> Calcular Projeção Detalhada';
+            btn.disabled = false;
+        }}
+    }}
+    
+    function mostrarResultados(resultados) {{
+        const divResultado = document.getElementById('resultado');
+        
+        let html = `
+            <div class="card border-success">
+                <div class="card-header bg-success text-white">
+                    <h4 class="mb-0"><i class="fas fa-chart-line"></i> Simulação Calculada com Sucesso!</h4>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-success">
+                        <h5><i class="fas fa-check-circle"></i> Cálculos concluídos</h5>
+                        <p>Redirecionando para análise detalhada...</p>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h5>Resumo Financeiro</h5>
+                            <table class="table table-bordered">
+                                <tr>
+                                    <th>Investimento Total:</th>
+                                    <td class="text-danger">R$ ${{resultados.investimento_total.toLocaleString('pt-BR', {{minimumFractionDigits: 2}})}}</td>
+                                </tr>
+                                <tr>
+                                    <th>Retorno Mensal:</th>
+                                    <td class="text-success">R$ ${{resultados.retorno_mensal.toLocaleString('pt-BR', {{minimumFractionDigits: 2}})}}</td>
+                                </tr>
+                                <tr>
+                                    <th>Payback:</th>
+                                    <td>${{resultados.payback_meses.toFixed(1)}} meses</td>
+                                </tr>
+                                <tr>
+                                    <th>ROI Anual:</th>
+                                    <td class="text-success">${{resultados.roi_percentual.toFixed(1)}}%</td>
+                                </tr>
+                            </table>
+                        </div>
+                        <div class="col-md-6">
+                            <h5>Indicadores Operacionais</h5>
+                            <table class="table table-bordered">
+                                <tr>
+                                    <th>Professores necessários:</th>
+                                    <td>${{resultados.professores_necessarios}}</td>
+                                </tr>
+                                <tr>
+                                    <th>Custo médio por aluno:</th>
+                                    <td>R$ ${{resultados.custo_medio_por_aluno.toFixed(2)}}</td>
+                                </tr>
+                                <tr>
+                                    <th>Custo por atividade:</th>
+                                    <td>R$ ${{resultados.custo_medio_por_atividade.toFixed(2)}}</td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        divResultado.innerHTML = html;
+        divResultado.style.display = 'block';
+        divResultado.scrollIntoView({{ behavior: 'smooth' }});
+    }}
+    </script>
+    
+    <style>
+    .badge-infantil {{ background-color: #FF6B8B; }}
+    .badge-fundamental {{ background-color: #4ECDC4; }}
+    .badge-medio {{ background-color: #45B7D1; }}
+    </style>
+    '''
+    return get_base_html("Simulação Detalhada - Business Plan", content)
+
+@app.route('/calcular', methods=['POST'])
+def calcular():
+    try:
+        dados = request.json
+        
+        # Validação básica
+        if not dados.get('alunos_atuais') or dados['alunos_atuais'] <= 0:
+            return jsonify({'error': 'Número de alunos atual inválido'}), 400
+            
+        if dados.get('aumento_esperado') < 30 or dados.get('aumento_esperado') > 50:
+            return jsonify({'warning': 'Aumento esperado deve estar entre 30% e 50%'})
+        
+        # Calcular custos detalhados
+        custos_detalhados = calcular_custos_detalhados(dados)
+        
+        # Calcular projeções
+        resultados = calcular_projecao(dados, custos_detalhados)
+        
+        # Salvar na sessão
+        session['ultima_simulacao'] = {
+            'dados_entrada': dados,
+            'resultados': resultados,
+            'custos_detalhados': custos_detalhados
+        }
+        
+        # Salvar no banco de dados
+        salvar_simulacao(dados, resultados, custos_detalhados)
+        
+        return jsonify(resultados)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/resultado')
+def resultado():
+    if 'ultima_simulacao' not in session:
+        return index()
+    
+    dados = session['ultima_simulacao']
+    custos_detalhados = dados['custos_detalhados']
+    
+    # Gerar HTML para tabelas de custos detalhados
+    tabelas_custos = ""
+    for categoria, info in custos_detalhados['categorias'].items():
+        linhas = ""
+        for detalhe in info['detalhes']:
+            valor_formatado = f"R$ {detalhe['valor']:,.2f}"
+            descricao = f"<br><small class='text-muted'>{detalhe.get('descricao', '')}</small>" if detalhe.get('descricao') else ""
+            por_aluno = " <span class='badge bg-info'>por aluno</span>" if detalhe.get('por_aluno', False) else ""
+            
+            linhas += f'''
+            <tr>
+                <td>{detalhe['item']}{por_aluno}{descricao}</td>
+                <td class="text-end">{valor_formatado}</td>
+            </tr>
+            '''
+        
+        tabelas_custos += f'''
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-{'primary' if categoria == 'professores' else 'info' if categoria == 'infraestrutura' else 'success' if categoria == 'material' else 'warning' if categoria == 'marketing' else 'secondary'} text-white">
+                    <h6 class="mb-0">
+                        <i class="fas fa-{'chalkboard-teacher' if categoria == 'professores' else 'building' if categoria == 'infraestrutura' else 'book' if categoria == 'material' else 'bullhorn' if categoria == 'marketing' else 'users'}"></i>
+                        {categoria.replace('_', ' ').title()}
+                        <span class="float-end">R$ {info['total']:,.2f}</span>
+                    </h6>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table table-sm mb-0">
+                        <tbody>
+                            {linhas}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        '''
+    
+    # Gerar gráfico de distribuição de custos
+    chart_data_labels = []
+    chart_data_values = []
+    chart_background_colors = [
+        'rgba(54, 162, 235, 0.7)',   # Professores - azul
+        'rgba(75, 192, 192, 0.7)',   # Infraestrutura - verde água
+        'rgba(255, 206, 86, 0.7)',   # Material - amarelo
+        'rgba(255, 99, 132, 0.7)',   # Marketing - vermelho
+        'rgba(153, 102, 255, 0.7)',  # RH - roxo
+        'rgba(201, 203, 207, 0.7)'   # Outros - cinza
+    ]
+    
+    for i, (categoria, info) in enumerate(custos_detalhados['categorias'].items()):
+        if info['total'] > 0:
+            chart_data_labels.append(categoria.title())
+            chart_data_values.append(info['total'])
+    
+    chart_js = f'''
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {{
+        // Gráfico de distribuição de custos
+        const ctx1 = document.getElementById('chartCustos').getContext('2d');
+        new Chart(ctx1, {{
+            type: 'pie',
+            data: {{
+                labels: {json.dumps(chart_data_labels)},
+                datasets: [{{
+                    data: {json.dumps(chart_data_values)},
+                    backgroundColor: {json.dumps(chart_background_colors[:len(chart_data_labels)])},
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                plugins: {{
+                    legend: {{ position: 'bottom' }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: function(context) {{
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = Math.round((context.parsed / total) * 100);
+                                return context.label + ': R$ ' + context.parsed.toLocaleString('pt-BR') + 
+                                       ' (' + percentage + '%)';
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+        }});
+        
+        // Gráfico de receitas
+        const ctx2 = document.getElementById('chartReceitas').getContext('2d');
+        new Chart(ctx2, {{
+            type: 'bar',
+            data: {{
+                labels: ['Receita Atual', 'Receita Projetada'],
+                datasets: [{{
+                    label: 'Valor em R$',
+                    data: [{dados['resultados']['receita_atual']}, {dados['resultados']['receita_projetada']}],
+                    backgroundColor: [
+                        'rgba(54, 162, 235, 0.5)',
+                        'rgba(75, 192, 192, 0.5)'
+                    ],
+                    borderColor: [
+                        'rgba(54, 162, 235, 1)',
+                        'rgba(75, 192, 192, 1)'
+                    ],
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: function(context) {{
+                                return 'R$ ' + context.parsed.y.toLocaleString('pt-BR');
+                            }}
+                        }}
+                    }}
+                }},
+                scales: {{
+                    y: {{
+                        beginAtZero: true,
+                        ticks: {{
+                            callback: function(value) {{
+                                return 'R$ ' + value.toLocaleString('pt-BR');
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+        }});
+    }});
+    </script>
+    '''
+    
+    content = f'''
+    <div class="row">
+        <div class="col-lg-10 mx-auto">
+            <div class="card shadow mb-4">
+                <div class="card-header bg-primary text-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h3 class="mb-0"><i class="fas fa-chart-pie"></i> Análise Detalhada da Projeção</h3>
+                            <p class="mb-0">
+                                Nível: <span class="badge badge-{dados['custos_detalhados']['nivel_escolar']}">
+                                    {dados['custos_detalhados']['nivel_escolar'].replace('_', ' ').title()}
+                                </span>
+                                | Aumento: {dados['dados_entrada']['aumento_esperado']}%
+                                | Atividades: {len(dados['custos_detalhados']['atividades_selecionadas'])}
+                            </p>
+                        </div>
+                        <span class="badge bg-light text-primary fs-6">
+                            ROI: {dados['resultados']['roi_percentual']:.1f}%
+                        </span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="card">
+                                <div class="card-header bg-info text-white">
+                                    <h5 class="mb-0"><i class="fas fa-chart-bar"></i> Comparativo de Receitas</h5>
+                                </div>
+                                <div class="card-body">
+                                    <canvas id="chartReceitas" height="200"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-header bg-success text-white">
+                                    <h5 class="mb-0"><i class="fas fa-user-plus"></i> Crescimento</h5>
+                                </div>
+                                <div class="card-body text-center">
+                                    <h1 class="display-1 text-primary">{dados['resultados']['novos_alunos']}</h1>
+                                    <p class="lead">Novos Alunos</p>
+                                    <div class="progress" style="height: 30px;">
+                                        <div class="progress-bar bg-success" role="progressbar" 
+                                             style="width: {dados['dados_entrada']['aumento_esperado']}%">
+                                            {dados['dados_entrada']['aumento_esperado']}% de Aumento
+                                        </div>
+                                    </div>
+                                    <p class="mt-3 mb-0">
+                                        <small>Professores necessários: <strong>{dados['resultados']['professores_necessarios']}</strong></small>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-warning text-dark">
+                                    <h5 class="mb-0"><i class="fas fa-money-bill-wave"></i> Indicadores Financeiros</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="row text-center">
+                                        <div class="col-6">
+                                            <div class="p-3 border rounded bg-light">
+                                                <h6>Payback</h6>
+                                                <h3 class="text-primary">{dados['resultados']['payback_meses']:.1f} meses</h3>
+                                                <small>Tempo para recuperar investimento</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-6">
+                                            <div class="p-3 border rounded bg-light">
+                                                <h6>ROI Anual</h6>
+                                                <h3 class="text-success">{dados['resultados']['roi_percentual']:.1f}%</h3>
+                                                <small>Retorno sobre investimento</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <table class="table table-bordered mt-3">
+                                        <tr>
+                                            <th>Investimento Total:</th>
+                                            <td class="text-end">R$ {dados['resultados']['investimento_total']:,.2f}</td>
+                                        </tr>
+                                        <tr>
+                                            <th>Retorno Mensal:</th>
+                                            <td class="text-end text-success">R$ {dados['resultados']['retorno_mensal']:,.2f}</td>
+                                        </tr>
+                                        <tr>
+                                            <th>Lucro Anual Projetado:</th>
+                                            <td class="text-end text-success">R$ {dados['resultados']['retorno_mensal'] * 12:,.2f}</td>
+                                        </tr>
+                                        <tr>
+                                            <th>Custo médio por aluno:</th>
+                                            <td class="text-end">R$ {dados['resultados']['custo_medio_por_aluno']:,.2f}</td>
+                                        </tr>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-danger text-white">
+                                    <h5 class="mb-0"><i class="fas fa-chart-pie"></i> Distribuição de Custos</h5>
+                                </div>
+                                <div class="card-body">
+                                    <canvas id="chartCustos" height="200"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12">
+                            <div class="card">
+                                <div class="card-header bg-dark text-white">
+                                    <h5 class="mb-0"><i class="fas fa-list-alt"></i> Detalhamento de Custos por Categoria</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="row">
+                                        {tabelas_custos}
+                                    </div>
+                                    
+                                    <div class="alert alert-info mt-4">
+                                        <h6><i class="fas fa-lightbulb"></i> Atividades Selecionadas:</h6>
+                                        <div class="mt-2">
+                                            {', '.join(dados['custos_detalhados']['atividades_selecionadas']) if dados['custos_detalhados']['atividades_selecionadas'] else 'Nenhuma atividade selecionada'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12">
+                            <div class="card">
+                                <div class="card-header bg-success text-white">
+                                    <h5 class="mb-0"><i class="fas fa-lightbulb"></i> Recomendações Estratégicas</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="alert {'alert-success' if dados['resultados']['roi_percentual'] > 100 else 'alert-warning'}">
+                                        <h5>
+                                            <i class="fas {'fa-check-circle' if dados['resultados']['roi_percentual'] > 100 else 'fa-exclamation-triangle'}"></i> 
+                                            Viabilidade Financeira: {'ALTA' if dados['resultados']['roi_percentual'] > 100 else 'MODERADA'}
+                                        </h5>
+                                        <p>
+                                            O ROI de {dados['resultados']['roi_percentual']:.1f}% indica 
+                                            {'um excelente retorno sobre o investimento' if dados['resultados']['roi_percentual'] > 100 else 'um retorno satisfatório sobre o investimento'}.
+                                            Payback estimado em {dados['resultados']['payback_meses']:.1f} meses.
+                                        </p>
+                                    </div>
+                                    
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="card mb-3">
+                                                <div class="card-body">
+                                                    <h6><i class="fas fa-thumbs-up text-success"></i> Pontos Fortes</h6>
+                                                    <ul>
+                                                        <li>Aumento significativo de matrículas ({dados['dados_entrada']['aumento_esperado']}%)</li>
+                                                        <li>Receita adicional mensal: R$ {dados['resultados']['retorno_mensal']:,.2f}</li>
+                                                        <li>Diferenciação competitiva no mercado</li>
+                                                        <li>Oferta especializada para {dados['custos_detalhados']['nivel_escolar'].replace('_', ' ')}</li>
+                                                    </ul>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="card mb-3">
+                                                <div class="card-body">
+                                                    <h6><i class="fas fa-exclamation-triangle text-warning"></i> Considerações</h6>
+                                                    <ul>
+                                                        <li>Necessidade de {dados['resultados']['professores_necessarios']} professores especializados</li>
+                                                        <li>Investimento inicial: R$ {dados['resultados']['investimento_total']:,.2f}</li>
+                                                        <li>Gerenciamento de múltiplas atividades</li>
+                                                        <li>Adequação da infraestrutura necessária</li>
+                                                    </ul>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="text-center mt-3">
+                                        <a href="/simulacao" class="btn btn-primary me-2">
+                                            <i class="fas fa-redo"></i> Nova Simulação
+                                        </a>
+                                        <a href="/dashboard" class="btn btn-success me-2">
+                                            <i class="fas fa-tachometer-alt"></i> Dashboard
+                                        </a>
+                                        <button class="btn btn-info me-2" onclick="window.print()">
+                                            <i class="fas fa-print"></i> Imprimir Relatório
+                                        </button>
+                                        <a href="/simulacao/exportar" class="btn btn-warning">
+                                            <i class="fas fa-file-excel"></i> Exportar Dados
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {chart_js}
+    '''
+    return get_base_html("Resultados Detalhados - Business Plan", content)
+
+@app.route('/dashboard')
+def dashboard():
+    # Buscar todas as simulações
+    simulacoes_db = buscar_simulacoes()
+    
+    # Converter para lista de dicionários
+    simulacoes = []
+    for s in simulacoes_db:
+        try:
+            data_criacao = datetime.strptime(s['data_criacao'], '%Y-%m-%d %H:%M:%S')
+        except:
+            data_criacao = datetime.now()
+            
+        # Carregar dados extras
+        dados_extras = json.loads(s['dados']) if s['dados'] else {}
+        
+        simulacoes.append({
+            'id': s['id'],
+            'nome': s['nome'],
+            'data_criacao': data_criacao,
+            'alunos_atuais': s['alunos_atuais'],
+            'mensalidade_media': s['mensalidade_media'],
+            'aumento_esperado': s['aumento_esperado'],
+            'novos_alunos': s['novos_alunos'],
+            'nivel_escolar': s['nivel_escolar'],
+            'investimento_total': s['investimento_total'],
+            'retorno_mensal': s['retorno_mensal'],
+            'payback': s['payback'],
+            'roi': s['roi'],
+            'dados_extras': dados_extras
+        })
+    
+    # Estatísticas gerais
+    total_simulacoes = len(simulacoes)
+    
+    if total_simulacoes > 0:
+        media_aumento = sum([s['aumento_esperado'] for s in simulacoes]) / total_simulacoes
+        media_roi = sum([s['roi'] for s in simulacoes]) / total_simulacoes
+        media_payback = sum([s['payback'] for s in simulacoes]) / total_simulacoes
+    else:
+        media_aumento = media_roi = media_payback = 0
+    
+    # Criar tabela de simulações
+    tabela_html = ""
+    for s in simulacoes:
+        nivel_badge = f"<span class='badge badge-{s['nivel_escolar']}'>{s['nivel_escolar'].replace('_', ' ').title()}</span>"
+        
+        tabela_html += f'''
+        <tr>
+            <td>{s['data_criacao'].strftime('%d/%m/%Y')}</td>
+            <td>{s['nome']}</td>
+            <td>{nivel_badge}</td>
+            <td>{s['alunos_atuais']}</td>
+            <td><span class="badge bg-success">{s['novos_alunos']}</span></td>
+            <td><span class="badge bg-info">{s['aumento_esperado']}%</span></td>
+            <td>R$ {s['investimento_total']:,.2f}</td>
+            <td>
+                <span class="badge {'bg-success' if s['roi'] > 100 else 'bg-warning'}">
+                    {s['roi']:.1f}%
+                </span>
+            </td>
+            <td>{s['payback']:.1f} meses</td>
+            <td>
+                <a href="/simulacao/{s['id']}" class="btn btn-sm btn-primary">
+                    <i class="fas fa-eye"></i> Ver
+                </a>
+            </td>
+        </tr>
+        '''
+    
+    if total_simulacoes == 0:
+        tabela_html = '''
+        <tr>
+            <td colspan="10" class="text-center py-5">
+                <i class="fas fa-inbox fa-4x text-muted mb-3"></i>
+                <h4>Nenhuma simulação encontrada</h4>
+                <p>Realize sua primeira simulação para começar a análise</p>
+                <a href="/simulacao" class="btn btn-primary">
+                    <i class="fas fa-plus-circle"></i> Nova Simulação
+                </a>
+            </td>
+        </tr>
+        '''
+    
+    content = f'''
+    <div class="row">
+        <div class="col-12">
+            <div class="card shadow mb-4">
+                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <h3 class="mb-0"><i class="fas fa-tachometer-alt"></i> Dashboard - Histórico de Simulações</h3>
+                    <span class="badge bg-light text-primary fs-6">{total_simulacoes} simulações</span>
+                </div>
+                <div class="card-body">
+                    <div class="row mb-4">
+                        <div class="col-md-3">
+                            <div class="card text-white bg-info mb-3">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div>
+                                            <h6 class="card-title">Média de Aumento</h6>
+                                            <h2 class="mb-0">{media_aumento:.1f}%</h2>
+                                        </div>
+                                        <i class="fas fa-chart-line fa-3x opacity-50"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card text-white bg-success mb-3">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div>
+                                            <h6 class="card-title">ROI Médio</h6>
+                                            <h2 class="mb-0">{media_roi:.1f}%</h2>
+                                        </div>
+                                        <i class="fas fa-percentage fa-3x opacity-50"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card text-white bg-warning mb-3">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div>
+                                            <h6 class="card-title">Payback Médio</h6>
+                                            <h2 class="mb-0">{media_payback:.1f} meses</h2>
+                                        </div>
+                                        <i class="fas fa-calendar-alt fa-3x opacity-50"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card text-white bg-danger mb-3">
+                                <div class="card-body">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div>
+                                            <h6 class="card-title">Total Simulações</h6>
+                                            <h2 class="mb-0">{total_simulacoes}</h2>
+                                        </div>
+                                        <i class="fas fa-database fa-3x opacity-50"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-12">
+                            <div class="card">
+                                <div class="card-header bg-dark text-white">
+                                    <h5 class="mb-0"><i class="fas fa-history"></i> Histórico de Simulações por Nível Escolar</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="table-responsive">
+                                        <table class="table table-hover">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>Data</th>
+                                                    <th>Nome</th>
+                                                    <th>Nível</th>
+                                                    <th>Alunos</th>
+                                                    <th>Novos</th>
+                                                    <th>Aumento</th>
+                                                    <th>Investimento</th>
+                                                    <th>ROI</th>
+                                                    <th>Payback</th>
+                                                    <th>Ações</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {tabela_html}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-info text-white">
+                                    <h5 class="mb-0"><i class="fas fa-chart-bar"></i> Distribuição por Nível Escolar</h5>
+                                </div>
+                                <div class="card-body">
+                                    <canvas id="chartNiveis" height="200"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-success text-white">
+                                    <h5 class="mb-0"><i class="fas fa-bullseye"></i> Metas e Recomendações</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="alert alert-success">
+                                        <h5><i class="fas fa-trophy"></i> Metas por Nível</h5>
+                                        <ul class="mb-0">
+                                            <li><strong>Infantil:</strong> ROI mínimo 80%, Payback máximo 20 meses</li>
+                                            <li><strong>Fundamental:</strong> ROI mínimo 100%, Payback máximo 18 meses</li>
+                                            <li><strong>Médio:</strong> ROI mínimo 120%, Payback máximo 15 meses</li>
+                                        </ul>
+                                    </div>
+                                    
+                                    <div class="alert alert-info">
+                                        <h5><i class="fas fa-check-circle"></i> KPIs de Sucesso</h5>
+                                        <ul class="mb-0">
+                                            <li>Taxa de adesão às atividades: 70%+</li>
+                                            <li>Satisfação dos pais: 90%+</li>
+                                            <li>Retenção de alunos: 85%+</li>
+                                            <li>Crescimento orgânico: 10%+ ao ano</li>
+                                        </ul>
+                                    </div>
+                                    
+                                    <div class="text-center mt-3">
+                                        <a href="/simulacao" class="btn btn-primary">
+                                            <i class="fas fa-plus-circle"></i> Nova Simulação
+                                        </a>
+                                        <a href="/info" class="btn btn-info ms-2">
+                                            <i class="fas fa-info-circle"></i> Informações
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {{
+        // Contar simulações por nível
+        const niveis = {json.dumps([s['nivel_escolar'] for s in simulacoes])};
+        const contagem = {{}};
+        niveis.forEach(nivel => {{
+            contagem[nivel] = (contagem[nivel] || 0) + 1;
+        }});
+        
+        if (Object.keys(contagem).length > 0) {{
+            const ctx = document.getElementById('chartNiveis').getContext('2d');
+            new Chart(ctx, {{
+                type: 'doughnut',
+                data: {{
+                    labels: Object.keys(contagem).map(n => n.replace('_', ' ').toUpperCase()),
+                    datasets: [{{
+                        data: Object.values(contagem),
+                        backgroundColor: [
+                            'rgba(255, 107, 139, 0.7)',   // Infantil
+                            'rgba(78, 205, 196, 0.7)',    // Fundamental I
+                            'rgba(69, 183, 209, 0.7)',    // Fundamental II
+                            'rgba(255, 193, 7, 0.7)'      // Médio
+                        ],
+                        borderWidth: 1
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    plugins: {{
+                        legend: {{ position: 'bottom' }}
+                    }}
+                }}
+            }});
+        }}
+    }});
+    </script>
+    '''
+    return get_base_html("Dashboard - Business Plan", content)
+
+@app.route('/simulacao/<int:id>')
+def ver_simulacao(id):
+    simulacao_db = buscar_simulacao_por_id(id)
+    if simulacao_db:
+        try:
+            dados_json = json.loads(simulacao_db['dados'])
+        except:
+            dados_json = {'entrada': {}, 'resultados': {}, 'custos_detalhados': {}}
+        
+        # Salvar na sessão para a rota /resultado usar
+        session['ultima_simulacao'] = dados_json
+        return redirect('/resultado')
+    return index()
+
+@app.route('/simulacao/exportar')
+def exportar_simulacao():
+    if 'ultima_simulacao' not in session:
+        return redirect('/')
+    
+    dados = session['ultima_simulacao']
+    
+    # Criar um formato simplificado para exportação
+    export_data = {
+        'timestamp': datetime.now().isoformat(),
+        'dados_entrada': dados['dados_entrada'],
+        'resultados': dados['resultados'],
+        'custos_detalhados': dados.get('custos_detalhados', {})
+    }
+    
+    return jsonify(export_data)
+
+@app.route('/info')
+def info():
+    simulacoes_count = len(buscar_simulacoes())
+    
+    # Contar por nível escolar
+    simulacoes = buscar_simulacoes()
+    contagem_niveis = {}
+    for s in simulacoes:
+        nivel = s['nivel_escolar']
+        contagem_niveis[nivel] = contagem_niveis.get(nivel, 0) + 1
+    
+    niveis_html = ""
+    for nivel, count in contagem_niveis.items():
+        niveis_html += f'''
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h3>{count}</h3>
+                    <p>{nivel.replace('_', ' ').title()}</p>
+                </div>
+            </div>
+        </div>
+        '''
+    
+    content = f'''
+    <div class="row">
+        <div class="col-lg-10 mx-auto">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h3 class="mb-0"><i class="fas fa-info-circle"></i> Informações do Sistema Avançado</h3>
+                </div>
+                <div class="card-body">
+                    <h4>Sistema de Business Plan Escolar - Versão Avançada</h4>
+                    <p><strong>Versão:</strong> 2.0.0 (com custos específicos)</p>
+                    <p><strong>Status:</strong> Online e operacional</p>
+                    <p><strong>Última atualização:</strong> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
+                    
+                    <h5 class="mt-4">Estatísticas do Sistema:</h5>
+                    <div class="row mb-4">
+                        <div class="col-md-3">
+                            <div class="card bg-info text-white">
+                                <div class="card-body text-center">
+                                    <h3>{simulacoes_count}</h3>
+                                    <p>Total de Simulações</p>
+                                </div>
+                            </div>
+                        </div>
+                        {niveis_html}
+                    </div>
+                    
+                    <h5 class="mt-4">Funcionalidades Avançadas:</h5>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <ul>
+                                <li><strong>Custos por nível escolar</strong> - Infantil, Fundamental I/II, Médio</li>
+                                <li><strong>Seleção de atividades específicas</strong> por nível</li>
+                                <li><strong>Cálculo automático de professores</strong> necessários</li>
+                                <li><strong>Ratio professor/aluno</strong> configurável por nível</li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <ul>
+                                <li><strong>Custos detalhados por categoria</strong> - 4 categorias principais</li>
+                                <li><strong>Seleção de itens de custo</strong> personalizável</li>
+                                <li><strong>Materiais por aluno</strong> ou fixos</li>
+                                <li><strong>Gráficos interativos</strong> de distribuição</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <h5 class="mt-4">Categorias de Custos Implementadas:</h5>
+                    <div class="row">
+                        <div class="col-md-3">
+                            <div class="alert alert-primary">
+                                <strong>Infraestrutura</strong><br>
+                                {len(CATEGORIAS_CUSTOS['infraestrutura']['itens'])} itens
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="alert alert-success">
+                                <strong>Material</strong><br>
+                                {len(CATEGORIAS_CUSTOS['material']['itens'])} itens
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="alert alert-warning">
+                                <strong>Marketing</strong><br>
+                                {len(CATEGORIAS_CUSTOS['marketing']['itens'])} itens
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="alert alert-info">
+                                <strong>Recursos Humanos</strong><br>
+                                {len(CATEGORIAS_CUSTOS['recursos_humanos']['itens'])} itens
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="text-center mt-4">
+                        <a href="/" class="btn btn-primary">
+                            <i class="fas fa-home"></i> Voltar ao Sistema
+                        </a>
+                        <a href="/dashboard" class="btn btn-success ms-2">
+                            <i class="fas fa-chart-bar"></i> Ver Dashboard
+                        </a>
+                        <a href="/simulacao" class="btn btn-warning ms-2">
+                            <i class="fas fa-calculator"></i> Nova Simulação
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
+    return get_base_html("Informações do Sistema", content)
+
+# Rota de saúde
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy', 
+        'timestamp': datetime.now().isoformat(),
+        'service': 'Business Plan Escolar - Versão Avançada',
+        'version': '2.0.0',
+        'database': 'active',
+        'simulations_count': len(buscar_simulacoes()),
+        'features': {
+            'cost_categories': len(CATEGORIAS_CUSTOS),
+            'school_levels': len(CUSTOS_POR_NIVEL),
+            'total_cost_items': sum(len(cat['itens']) for cat in CATEGORIAS_CUSTOS.values())
+        }
+    })
+
+# Tratamento de erros
+@app.errorhandler(404)
+def page_not_found(e):
+    content = '''
+    <div class="container text-center py-5">
+        <div class="row">
+            <div class="col-lg-6 mx-auto">
+                <div class="card shadow">
+                    <div class="card-body p-5">
+                        <h1 class="display-1 text-muted">404</h1>
+                        <h2 class="mb-4">Página não encontrada</h2>
+                        <p class="lead mb-4">
+                            A página que você está procurando não existe ou foi movida.
+                        </p>
+                        <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
+                            <a href="/" class="btn btn-primary btn-lg px-4 gap-3">
+                                <i class="fas fa-home"></i> Voltar ao Início
+                            </a>
+                            <a href="/simulacao" class="btn btn-outline-primary btn-lg px-4">
+                                <i class="fas fa-calculator"></i> Nova Simulação
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
+    return get_base_html("Página não encontrada - 404", content), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    content = '''
+    <div class="container text-center py-5">
+        <div class="row">
+            <div class="col-lg-6 mx-auto">
+                <div class="card shadow">
+                    <div class="card-body p-5">
+                        <h1 class="display-1 text-danger">500</h1>
+                        <h2 class="mb-4">Erro interno do servidor</h2>
+                        <p class="lead mb-4">
+                            Ocorreu um erro inesperado. Nossa equipe já foi notificada.
+                        </p>
+                        <p class="text-muted mb-4">
+                            Tente novamente em alguns instantes ou entre em contato com o suporte.
+                        </p>
+                        <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
+                            <a href="/" class="btn btn-primary btn-lg px-4 gap-3">
+                                <i class="fas fa-redo"></i> Tentar Novamente
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
+    return get_base_html("Erro Interno - 500", content), 500
+
+if __name__ == '__main__':
+    # Inicializar banco de dados
+    if init_db():
+        print("=" * 60)
+        print("🚀 SISTEMA DE BUSINESS PLAN ESCOLAR - VERSÃO AVANÇADA")
+        print("=" * 60)
+        print("📊 Sistema com custos específicos por nível escolar")
+        print("=" * 60)
+        
+        # Configurações
+        port = int(os.environ.get('PORT', 5000))
+        debug = os.environ.get('FLASK_ENV') != 'production'
+        
+        if debug:
+            print("🔧 Modo: Desenvolvimento")
+            print("🌐 Acesse: http://localhost:{}".format(port))
+        else:
+            print("🚀 Modo: Produção")
+            print("✅ Sistema pronto para acesso remoto")
+        
+        # Informações
+        print("\n📊 Funcionalidades implementadas:")
+        print("   ✅ Custos por nível escolar (4 níveis)")
+        print("   ✅ {0} categorias de custos detalhadas".format(len(CATEGORIAS_CUSTOS)))
+        print("   ✅ {0} itens de custo configuráveis".format(sum(len(cat['itens']) for cat in CATEGORIAS_CUSTOS.values())))
+        print("   ✅ Cálculo automático de professores necessários")
+        print("   ✅ Seleção de atividades específicas por nível")
+        
+        print("\n💡 Dicas de uso:")
+        print("   1. Selecione o nível escolar para custos específicos")
+        print("   2. Escolha atividades adequadas ao nível")
+        print("   3. Selecione itens de custo conforme necessidade")
+        print("   4. Analise o ROI e payback por nível")
+        
+        print("=" * 60)
+        print("📢 Sistema iniciado com sucesso!")
+        print("=" * 60)
+        
+        # Executar aplicação
+        app.run(
+            debug=debug, 
+            port=port, 
+            host='0.0.0.0',
+            threaded=True
+        )
+    else:
+        print("❌ Não foi possível inicializar o sistema.")
