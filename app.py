@@ -1,110 +1,70 @@
+# app.py - Business Plan Escolar com IA - VERSÃO CORRIGIDA
 from flask import Flask, render_template_string, request, jsonify, session, redirect
 from datetime import datetime
 import json
-import math
 import os
 import sqlite3
+import openai
+from typing import Dict, List, Any
 
 app = Flask(__name__)
 
-# Configuração para produção
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'business_plan_escolar_prod_2024_seguro')
-app.config['TEMPLATES_AUTO_RELOAD'] = os.environ.get('FLASK_ENV') == 'development'
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 31536000
+# Configuração
+app.config['SECRET_KEY'] = 'business_plan_ia_escolar_2024'
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+
+# Configurar OpenAI (opcional)
+openai.api_key = os.environ.get('OPENAI_API_KEY', '')
 
 # Configuração do banco de dados
 basedir = os.path.abspath(os.path.dirname(__file__))
-DATABASE = os.path.join(basedir, 'data', 'database.db')
+DATABASE = os.path.join(basedir, 'database_com_ia.db')
 
-# Dados padrão para custos por nível escolar
-CUSTOS_POR_NIVEL = {
-    'infantil': {
-        'custo_professor_por_hora': 45,
-        'material_mensal_por_aluno': 80,
-        'atividades_especificas': ['Música', 'Artes', 'Psicomotricidade', 'Contação de Histórias'],
-        'infraestrutura_especifica': ['Brinquedoteca', 'Parque infantil', 'Sala multiuso'],
-        'ratio_professor_aluno': 10  # 1 professor para cada 10 alunos
-    },
-    'fundamental_i': {
-        'custo_professor_por_hora': 50,
-        'material_mensal_por_aluno': 60,
-        'atividades_especificas': ['Robótica', 'Programação', 'Teatro', 'Esportes', 'Inglês'],
-        'infraestrutura_especifica': ['Laboratório de informática', 'Quadra poliesportiva', 'Biblioteca'],
-        'ratio_professor_aluno': 15
-    },
-    'fundamental_ii': {
-        'custo_professor_por_hora': 55,
-        'material_mensal_por_aluno': 70,
-        'atividades_especificas': ['Robótica Avançada', 'Olimpíadas Científicas', 'Debate', 'Música Instrumental', 'Esportes Competitivos'],
-        'infraestrutura_especifica': ['Laboratório de ciências', 'Estúdio de música', 'Sala de estudos'],
-        'ratio_professor_aluno': 20
-    },
-    'medio': {
-        'custo_professor_por_hora': 65,
-        'material_mensal_por_aluno': 90,
-        'atividades_especificas': ['Preparatório ENEM', 'Orientação Profissional', 'Projetos Científicos', 'Debates Filosóficos', 'Empreendedorismo'],
-        'infraestrutura_especifica': ['Laboratório avançado', 'Sala de projeção', 'Espaço coworking'],
-        'ratio_professor_aluno': 25
-    }
+# Segmentos básicos
+SEGMENTOS = {
+    'ei': {'nome': 'Educação Infantil', 'cor': '#FF6B8B', 'descricao': '0-5 anos'},
+    'ef_i': {'nome': 'Ensino Fundamental I', 'cor': '#4ECDC4', 'descricao': '6-10 anos'},
+    'ef_ii': {'nome': 'Ensino Fundamental II', 'cor': '#45B7D1', 'descricao': '11-14 anos'},
+    'em': {'nome': 'Ensino Médio', 'cor': '#FF9F1C', 'descricao': '15-17 anos'}
 }
 
-# Categorias detalhadas de custos
+# Categorias de custos
 CATEGORIAS_CUSTOS = {
-    'infraestrutura': {
-        'itens': [
-            {'nome': 'Reforma de salas', 'custo_base': 5000, 'descricao': 'Adaptação para atividades específicas'},
-            {'nome': 'Equipamentos tecnológicos', 'custo_base': 15000, 'descricao': 'Computadores, tablets, projetores'},
-            {'nome': 'Materiais esportivos', 'custo_base': 3000, 'descricao': 'Bolas, redes, equipamentos'},
-            {'nome': 'Instrumentos musicais', 'custo_base': 8000, 'descricao': 'Violões, teclados, percussão'},
-            {'nome': 'Mobiliário especializado', 'custo_base': 7000, 'descricao': 'Mesas, cadeiras, armários'},
-            {'nome': 'Kit robótica/programação', 'custo_base': 12000, 'descricao': 'Kits Arduino, impressora 3D'}
-        ]
+    'investimento_inicial': ['Reforma', 'Equipamentos', 'Materiais', 'Móveis', 'Licenças'],
+    'custos_mensais_fixos': ['Aluguel', 'Condomínio', 'Água', 'Energia', 'Internet', 'Limpeza'],
+    'custos_mensais_variaveis': ['Material consumo', 'Material didático', 'Uniformes', 'Transporte'],
+    'marketing': ['Site', 'Redes sociais', 'Publicidade', 'Divulgação'],
+    'recursos_humanos': ['Salários professores', 'Coordenador', 'Secretária', 'Encargos']
+}
+
+# Benchmark do setor educativo
+BENCHMARKS = {
+    'margem_lucro_ideal': 30,
+    'roi_minimo_aceitavel': 100,
+    'payback_maximo': 36,
+    'ratio_aluno_professor': {
+        'ei': 10,
+        'ef_i': 15,
+        'ef_ii': 20,
+        'em': 25
     },
-    'material': {
-        'itens': [
-            {'nome': 'Material didático', 'custo_base': 2000, 'por_aluno': True},
-            {'nome': 'Kits de atividades', 'custo_base': 1500, 'por_aluno': True},
-            {'nome': 'Uniformes', 'custo_base': 3000, 'por_aluno': True},
-            {'nome': 'Material de consumo', 'custo_base': 1000, 'descricao': 'Papel, tinta, etc'},
-            {'nome': 'Livros paradidáticos', 'custo_base': 4000, 'por_aluno': True}
-        ]
+    'custo_professor_hora': {
+        'ei': 45,
+        'ef_i': 50,
+        'ef_ii': 55,
+        'em': 65
     },
-    'marketing': {
-        'itens': [
-            {'nome': 'Site e redes sociais', 'custo_base': 3000, 'descricao': 'Desenvolvimento e manutenção'},
-            {'nome': 'Material impresso', 'custo_base': 1500, 'descricao': 'Folhetos, banners, cartazes'},
-            {'nome': 'Eventos de divulgação', 'custo_base': 5000, 'descricao': 'Open school, workshops'},
-            {'nome': 'Publicidade online', 'custo_base': 4000, 'descricao': 'Google Ads, redes sociais'},
-            {'nome': 'Produção de vídeos', 'custo_base': 6000, 'descricao': 'Vídeos institucionais'}
-        ]
-    },
-    'recursos_humanos': {
-        'itens': [
-            {'nome': 'Capacitação de professores', 'custo_base': 8000, 'descricao': 'Cursos e workshops'},
-            {'nome': 'Contratação especialistas', 'custo_base': 15000, 'descricao': 'Professores específicos'},
-            {'nome': 'Equipe de apoio', 'custo_base': 6000, 'descricao': 'Coordenadores, monitores'},
-            {'nome': 'Benefícios e encargos', 'custo_base': 10000, 'descricao': 'VT, VR, saúde'}
-        ]
-    },
-    'custos_mensais': {
-        'itens': [
-            {'nome': 'Salário professores', 'custo_mensal': 8000, 'descricao': 'Pago a professores das atividades'},
-            {'nome': 'Manutenção e limpeza', 'custo_mensal': 2000, 'descricao': 'Limpeza, conservação de equipamentos'},
-            {'nome': 'Utilities (luz, água, gás)', 'custo_mensal': 1500, 'descricao': 'Contas de serviços essenciais'},
-            {'nome': 'Seguro e vigilância', 'custo_mensal': 1200, 'descricao': 'Seguro predial e vigilância'},
-            {'nome': 'Telefone e internet', 'custo_mensal': 500, 'descricao': 'Comunicação e conectividade'},
-            {'nome': 'Materiais de consumo mensal', 'custo_mensal': 800, 'descricao': 'Papel, tinta, produtos de limpeza'}
-        ]
+    'receita_media_aluno_mes': {
+        'ei': 150,
+        'ef_i': 180,
+        'ef_ii': 200,
+        'em': 250
     }
 }
 
 def init_db():
-    """Inicializa o banco de dados SQLite"""
+    """Inicializa o banco de dados"""
     try:
-        data_dir = os.path.join(basedir, 'data')
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir, exist_ok=True)
-        
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
         
@@ -113,439 +73,52 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nome TEXT,
             data_criacao TEXT,
-            alunos_atuais INTEGER,
-            receita_alunos_atividade REAL,
-            receita_nao_alunos_atividade REAL,
-            aumento_esperado REAL,
-            novos_alunos INTEGER,
-            nivel_escolar TEXT,
-            atividades_selecionadas TEXT,
-            custos_detalhados TEXT,
-            receita_mensal_atual REAL,
-            receita_projetada REAL,
+            data_atualizacao TEXT,
+            total_alunos INTEGER,
+            total_participantes INTEGER,
             investimento_total REAL,
-            retorno_mensal REAL,
-            payback REAL,
-            roi REAL,
-            dados TEXT,
-            custo_mensal_operacional REAL DEFAULT 0,
-            quantidade_alunos_atividade INTEGER DEFAULT 0,
-            quantidade_nao_alunos_atividade INTEGER DEFAULT 0
+            custo_mensal_total REAL,
+            receita_mensal_total REAL,
+            lucro_mensal_total REAL,
+            payback_meses REAL,
+            roi_percentual REAL,
+            margem_lucro REAL,
+            dados_completos TEXT,
+            analise_ia TEXT
         )
         ''')
         
-        # Verificar e adicionar colunas faltantes (para dados antigos)
-        cursor.execute("PRAGMA table_info(simulacoes)")
-        colunas_existentes = [col[1] for col in cursor.fetchall()]
-        
-        colunas_obrigatorias = [
-            'receita_alunos_atividade',
-            'receita_nao_alunos_atividade',
-            'custo_mensal_operacional',
-            'quantidade_alunos_atividade',
-            'quantidade_nao_alunos_atividade'
-        ]
-        
-        for coluna in colunas_obrigatorias:
-            if coluna not in colunas_existentes:
-                try:
-                    if coluna in ['custo_mensal_operacional', 'quantidade_alunos_atividade', 'quantidade_nao_alunos_atividade']:
-                        cursor.execute(f"ALTER TABLE simulacoes ADD COLUMN {coluna} REAL DEFAULT 0")
-                    else:
-                        cursor.execute(f"ALTER TABLE simulacoes ADD COLUMN {coluna} REAL")
-                    print(f"✅ Coluna '{coluna}' adicionada ao banco de dados")
-                except Exception as e:
-                    print(f"⚠️ Coluna '{coluna}' pode já existir: {e}")
-        
-        conn.commit()
-        conn.close()
-        print("✅ Banco de dados inicializado com sucesso!")
-        return True
-    except Exception as e:
-        print(f"❌ Erro ao inicializar banco de dados: {e}")
-        return False
-
-def salvar_simulacao(dados_entrada, resultados, custos_detalhados):
-    """Salva uma simulação no banco de dados"""
-    try:
-        conn = sqlite3.connect(DATABASE)
-        cursor = conn.cursor()
-        
         cursor.execute('''
-        INSERT INTO simulacoes (
-            nome, data_criacao, alunos_atuais, receita_alunos_atividade,
-            receita_nao_alunos_atividade, aumento_esperado, novos_alunos, nivel_escolar,
-            atividades_selecionadas, custos_detalhados,
-            receita_mensal_atual, receita_projetada, investimento_total,
-            retorno_mensal, payback, roi, dados,
-            custo_mensal_operacional, quantidade_alunos_atividade, quantidade_nao_alunos_atividade
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            f"Simulação {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            dados_entrada.get('alunos_atuais', 0),
-            dados_entrada.get('receita_alunos_atividade', 0),
-            dados_entrada.get('receita_nao_alunos_atividade', 0),
-            dados_entrada.get('aumento_esperado', 0),
-            resultados.get('novos_alunos', 0),
-            dados_entrada.get('nivel_escolar', 'fundamental_i'),
-            json.dumps(dados_entrada.get('atividades_selecionadas', [])),
-            json.dumps(custos_detalhados),
-            resultados.get('receita_atual', 0),
-            resultados.get('receita_projetada', 0),
-            resultados.get('investimento_total', 0),
-            resultados.get('retorno_mensal', 0),
-            resultados.get('payback_meses', 0),
-            resultados.get('roi_percentual', 0),
-            json.dumps({'entrada': dados_entrada, 'resultados': resultados, 'custos_detalhados': custos_detalhados}),
-            resultados.get('custo_mensal_operacional', 0),
-            dados_entrada.get('quantidade_alunos_atividade', 0),
-            dados_entrada.get('quantidade_nao_alunos_atividade', 0)
-        ))
+        CREATE TABLE IF NOT EXISTS atividades_simulacao (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            simulacao_id INTEGER,
+            segmento TEXT,
+            nome_atividade TEXT,
+            custo_hora_professor REAL,
+            horas_semanais REAL,
+            semanas_mes INTEGER DEFAULT 4,
+            alunos INTEGER,
+            nao_alunos INTEGER,
+            receita_aluno REAL,
+            receita_nao_aluno REAL,
+            custo_material_mensal REAL,
+            FOREIGN KEY (simulacao_id) REFERENCES simulacoes (id) ON DELETE CASCADE
+        )
+        ''')
         
         conn.commit()
         conn.close()
+        print("✅ Banco de dados com IA inicializado!")
         return True
     except Exception as e:
-        print(f"Erro ao salvar simulação: {e}")
+        print(f"❌ Erro: {e}")
         return False
 
-def buscar_simulacoes():
-    """Busca todas as simulações do banco de dados"""
-    try:
-        conn = sqlite3.connect(DATABASE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM simulacoes ORDER BY data_criacao DESC')
-        simulacoes = cursor.fetchall()
-        
-        conn.close()
-        return simulacoes
-    except Exception as e:
-        print(f"Erro ao buscar simulações: {e}")
-        return []
+# Inicializar banco de dados
+init_db()
 
-def buscar_simulacao_por_id(id):
-    """Busca uma simulação específica por ID"""
-    try:
-        conn = sqlite3.connect(DATABASE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM simulacoes WHERE id = ?', (id,))
-        simulacao = cursor.fetchone()
-        
-        conn.close()
-        return simulacao
-    except Exception as e:
-        print(f"Erro ao buscar simulação: {e}")
-        return None
-
-# Funções de cálculo aprimoradas
-def calcular_custos_detalhados(dados_entrada):
-    """Calcula custos detalhados por categoria"""
-    nivel = dados_entrada.get('nivel_escolar', 'fundamental_i')
-    alunos_atuais = dados_entrada.get('alunos_atuais', 0)
-    novos_alunos = int(alunos_atuais * (dados_entrada.get('aumento_esperado', 0) / 100))
-    total_alunos_projetado = alunos_atuais + novos_alunos
-    
-    # Configurações do nível escolar
-    config_nivel = CUSTOS_POR_NIVEL.get(nivel, CUSTOS_POR_NIVEL['fundamental_i'])
-    
-    # Atividades selecionadas
-    atividades_selecionadas = dados_entrada.get('atividades_selecionadas', [])
-    num_atividades = len(atividades_selecionadas) if atividades_selecionadas else 3
-    
-    # Cálculo de professores necessários
-    ratio = config_nivel['ratio_professor_aluno']
-    professores_necessarios = math.ceil(total_alunos_projetado / ratio)
-    
-    custos_detalhados = {
-        'categorias': {},
-        'resumo': {},
-        'nivel_escolar': nivel,
-        'atividades_selecionadas': atividades_selecionadas
-    }
-    
-    # 1. CUSTOS COM PROFESSORES
-    horas_semanais = dados_entrada.get('horas_semanais', 10)
-    semanas_mes = 4.3
-    custo_hora = config_nivel['custo_professor_por_hora']
-    
-    custo_professores = professores_necessarios * custo_hora * horas_semanais * semanas_mes
-    custos_detalhados['categorias']['professores'] = {
-        'total': custo_professores,
-        'detalhes': [
-            {'item': f'Professores especializados ({professores_necessarios})', 'valor': custo_professores * 0.7},
-            {'item': 'Coordenador de atividades', 'valor': custo_professores * 0.2},
-            {'item': 'Substituições e reserva', 'valor': custo_professores * 0.1}
-        ]
-    }
-    
-    # 2. CUSTOS DE INFRAESTRUTURA (seleção do usuário)
-    infra_itens_selecionados = dados_entrada.get('infra_itens_selecionados', [])
-    custo_infra = 0
-    detalhes_infra = []
-    
-    for item_nome in infra_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['infraestrutura']['itens']:
-            if item['nome'] == item_nome:
-                custo_item = item['custo_base']
-                # Ajuste por nível escolar
-                if nivel == 'infantil':
-                    custo_item *= 0.8
-                elif nivel == 'medio':
-                    custo_item *= 1.2
-                
-                custo_infra += custo_item
-                detalhes_infra.append({
-                    'item': item_nome,
-                    'valor': custo_item,
-                    'descricao': item.get('descricao', '')
-                })
-                break
-    
-    if not detalhes_infra:
-        # Valor padrão se nenhum item selecionado
-        custo_infra = dados_entrada.get('custo_infraestrutura', 1000)
-        detalhes_infra.append({
-            'item': 'Adaptações básicas',
-            'valor': custo_infra,
-            'descricao': 'Reformas e adaptações necessárias'
-        })
-    
-    custos_detalhados['categorias']['infraestrutura'] = {
-        'total': custo_infra,
-        'detalhes': detalhes_infra
-    }
-    
-    # 3. CUSTOS DE MATERIAL (por aluno)
-    material_itens_selecionados = dados_entrada.get('material_itens_selecionados', [])
-    custo_material = 0
-    detalhes_material = []
-    
-    for item_nome in material_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['material']['itens']:
-            if item['nome'] == item_nome:
-                if item.get('por_aluno', False):
-                    custo_item = item['custo_base'] * total_alunos_projetado
-                else:
-                    custo_item = item['custo_base']
-                
-                custo_material += custo_item
-                detalhes_material.append({
-                    'item': item_nome,
-                    'valor': custo_item,
-                    'por_aluno': item.get('por_aluno', False)
-                })
-                break
-    
-    if not detalhes_material:
-        # Valor padrão por aluno
-        custo_material_por_aluno = config_nivel['material_mensal_por_aluno']
-        custo_material = custo_material_por_aluno * total_alunos_projetado
-        detalhes_material.append({
-            'item': 'Material didático básico',
-            'valor': custo_material,
-            'por_aluno': True
-        })
-    
-    custos_detalhados['categorias']['material'] = {
-        'total': custo_material,
-        'detalhes': detalhes_material
-    }
-    
-    # 4. CUSTOS DE MARKETING
-    marketing_itens_selecionados = dados_entrada.get('marketing_itens_selecionados', [])
-    custo_marketing = 0
-    detalhes_marketing = []
-    
-    for item_nome in marketing_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['marketing']['itens']:
-            if item['nome'] == item_nome:
-                custo_marketing += item['custo_base']
-                detalhes_marketing.append({
-                    'item': item_nome,
-                    'valor': item['custo_base'],
-                    'descricao': item.get('descricao', '')
-                })
-                break
-    
-    if not detalhes_marketing:
-        custo_marketing = dados_entrada.get('custo_marketing', 800)
-        detalhes_marketing.append({
-            'item': 'Divulgação básica',
-            'valor': custo_marketing,
-            'descricao': 'Campanha inicial de divulgação'
-        })
-    
-    custos_detalhados['categorias']['marketing'] = {
-        'total': custo_marketing,
-        'detalhes': detalhes_marketing
-    }
-    
-    # 5. CUSTOS COM RECURSOS HUMANOS
-    rh_itens_selecionados = dados_entrada.get('rh_itens_selecionados', [])
-    custo_rh = 0
-    detalhes_rh = []
-    
-    for item_nome in rh_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['recursos_humanos']['itens']:
-            if item['nome'] == item_nome:
-                custo_rh += item['custo_base']
-                detalhes_rh.append({
-                    'item': item_nome,
-                    'valor': item['custo_base'],
-                    'descricao': item.get('descricao', '')
-                })
-                break
-    
-    if not detalhes_rh:
-        custo_rh = 5000  # Valor padrão
-        detalhes_rh.append({
-            'item': 'Treinamento básico',
-            'valor': custo_rh,
-            'descricao': 'Capacitação inicial da equipe'
-        })
-    
-    custos_detalhados['categorias']['recursos_humanos'] = {
-        'total': custo_rh,
-        'detalhes': detalhes_rh
-    }
-    
-    # 6. CUSTOS MENSAIS OPERACIONAIS
-    custos_mensais_itens_selecionados = dados_entrada.get('custos_mensais_itens_selecionados', [])
-    custo_mensal_total = 0
-    detalhes_custos_mensais = []
-    
-    for item_nome in custos_mensais_itens_selecionados:
-        for item in CATEGORIAS_CUSTOS['custos_mensais']['itens']:
-            if item['nome'] == item_nome:
-                valor_mensal = item.get('custo_mensal', 0)
-                custo_mensal_total += valor_mensal
-                detalhes_custos_mensais.append({
-                    'item': item_nome,
-                    'valor': valor_mensal,
-                    'descricao': item.get('descricao', ''),
-                    'tipo': 'mensal'
-                })
-                break
-    
-    if not detalhes_custos_mensais:
-        # Valores padrão se nenhum foi selecionado
-        custo_mensal_total = 14000
-        detalhes_custos_mensais = [
-            {'item': 'Salário professores', 'valor': 8000, 'descricao': 'Pago a professores das atividades', 'tipo': 'mensal'},
-            {'item': 'Manutenção e limpeza', 'valor': 2000, 'descricao': 'Limpeza, conservação', 'tipo': 'mensal'},
-            {'item': 'Utilities', 'valor': 1500, 'descricao': 'Luz, água, gás', 'tipo': 'mensal'},
-            {'item': 'Outros custos mensais', 'valor': 2500, 'descricao': 'Diversos', 'tipo': 'mensal'}
-        ]
-        custo_mensal_total = sum([d['valor'] for d in detalhes_custos_mensais])
-    
-    custos_detalhados['categorias']['custos_mensais'] = {
-        'total': custo_mensal_total,
-        'detalhes': detalhes_custos_mensais
-    }
-    
-    # 7. OUTROS CUSTOS
-    outros_custos = dados_entrada.get('outros_custos', 200)
-    custos_detalhados['categorias']['outros'] = {
-        'total': outros_custos,
-        'detalhes': [{'item': 'Custos diversos', 'valor': outros_custos}]
-    }
-    
-    # Resumo geral
-    investimento_total = sum([cat[1]['total'] for cat in custos_detalhados['categorias'].items() 
-                             if cat[0] != 'custos_mensais'])  # Investimento não inclui custos mensais
-    
-    custos_detalhados['resumo'] = {
-        'investimento_total': investimento_total,
-        'custo_mensal_operacional': custo_mensal_total,
-        'professores_necessarios': professores_necessarios,
-        'custo_medio_por_aluno': investimento_total / total_alunos_projetado if total_alunos_projetado > 0 else 0,
-        'custo_medio_por_atividade': investimento_total / num_atividades if num_atividades > 0 else 0
-    }
-    
-    return custos_detalhados
-
-def calcular_projecao(dados_entrada, custos_detalhados):
-    """Calcula todas as projeções baseadas nos dados inseridos"""
-    
-    receita_alunos_atividade = dados_entrada.get('receita_alunos_atividade', 0)
-    receita_nao_alunos_atividade = dados_entrada.get('receita_nao_alunos_atividade', 0)
-    
-    # NOVA ABORDAGEM: Quantidade DIRETA de alunos e não-alunos
-    # Se foram inseridos valores diretos, usar eles; senão, calcular pelo percentual
-    if 'quantidade_alunos_atividade' in dados_entrada and dados_entrada.get('quantidade_alunos_atividade'):
-        novos_alunos_atividade = int(dados_entrada.get('quantidade_alunos_atividade', 0))
-    else:
-        # Fallback: calcular pelo método antigo (se necessário)
-        alunos_atuais = dados_entrada.get('alunos_atuais', 0)
-        aumento_percentual = dados_entrada.get('aumento_esperado', 0) / 100
-        novos_alunos = int(alunos_atuais * aumento_percentual)
-        percentual_alunos_escola = dados_entrada.get('percentual_alunos_escola', 70) / 100
-        novos_alunos_atividade = int(novos_alunos * percentual_alunos_escola)
-    
-    if 'quantidade_nao_alunos_atividade' in dados_entrada and dados_entrada.get('quantidade_nao_alunos_atividade'):
-        novos_nao_alunos_atividade = int(dados_entrada.get('quantidade_nao_alunos_atividade', 0))
-    else:
-        # Fallback: calcular pelo método antigo
-        alunos_atuais = dados_entrada.get('alunos_atuais', 0)
-        aumento_percentual = dados_entrada.get('aumento_esperado', 0) / 100
-        novos_alunos = int(alunos_atuais * aumento_percentual)
-        percentual_nao_alunos = 1 - (dados_entrada.get('percentual_alunos_escola', 70) / 100)
-        novos_nao_alunos_atividade = int(novos_alunos * percentual_nao_alunos)
-    
-    novos_alunos = novos_alunos_atividade + novos_nao_alunos_atividade
-    
-    # Receitas baseadas em preços de atividade
-    receita_mensal = novos_alunos_atividade * receita_alunos_atividade + novos_nao_alunos_atividade * receita_nao_alunos_atividade
-    receita_atual = receita_mensal
-    receita_projetada = receita_mensal
-    
-    # Custos do investimento e custos mensais operacionais
-    investimento_total = custos_detalhados['resumo']['investimento_total']
-    custo_mensal_operacional = custos_detalhados['resumo'].get('custo_mensal_operacional', 0)
-    
-    # Lucro mensal = Receita - Custos Mensais
-    lucro_mensal = receita_mensal - custo_mensal_operacional
-    
-    # Retorno mensal adicional (lucro após custos operacionais)
-    retorno_mensal = lucro_mensal
-    
-    # Cálculo de payback e ROI
-    if retorno_mensal > 0:
-        payback_meses = investimento_total / retorno_mensal
-    else:
-        payback_meses = float('inf') if investimento_total > 0 else 0
-        
-    if investimento_total > 0:
-        roi_percentual = (retorno_mensal * 12 / investimento_total) * 100
-    else:
-        roi_percentual = 0
-    
-    return {
-        'novos_alunos': novos_alunos,
-        'novos_alunos_atividade': novos_alunos_atividade,
-        'novos_nao_alunos_atividade': novos_nao_alunos_atividade,
-        'receita_mensal': receita_mensal,
-        'receita_atual': receita_atual,
-        'receita_projetada': receita_projetada,
-        'custo_mensal_operacional': custo_mensal_operacional,
-        'lucro_mensal': lucro_mensal,
-        'investimento_total': investimento_total,
-        'retorno_mensal': retorno_mensal,
-        'payback_meses': payback_meses,
-        'roi_percentual': roi_percentual,
-        'professores_necessarios': custos_detalhados['resumo']['professores_necessarios'],
-        'custo_medio_por_aluno': custos_detalhados['resumo']['custo_medio_por_aluno'],
-        'custo_medio_por_atividade': custos_detalhados['resumo']['custo_medio_por_atividade']
-    }
-
-# Templates HTML inline
-def get_base_html(title="Business Plan Escolar", content=""):
-    """Retorna o HTML base para todas as páginas"""
+def get_base_html(title="Business Plan com IA", content=""):
+    """Retorna o HTML base"""
     return f'''<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -557,117 +130,184 @@ def get_base_html(title="Business Plan Escolar", content=""):
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {{
-            --primary-color: #4361ee;
-            --secondary-color: #3a0ca3;
-            --success-color: #4cc9f0;
-            --infantil-color: #FF6B8B;
-            --fundamental-color: #4ECDC4;
-            --medio-color: #45B7D1;
+            --ei-color: #FF6B8B;
+            --ef-i-color: #4ECDC4;
+            --ef-ii-color: #45B7D1;
+            --em-color: #FF9F1C;
         }}
-        body {{
-            background-color: #f5f7fb;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            min-height: 100vh;
-        }}
-        .navbar-brand {{
-            font-weight: 700;
-            font-size: 1.5rem;
-        }}
-        .card {{
-            border-radius: 10px;
-            border: none;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            margin-bottom: 20px;
-        }}
-        .card-header {{
-            border-radius: 10px 10px 0 0 !important;
-            font-weight: 600;
-        }}
-        .btn-primary {{
-            background-color: var(--primary-color);
-            border-color: var(--primary-color);
-        }}
-        .btn-primary:hover {{
-            background-color: var(--secondary-color);
-            border-color: var(--secondary-color);
-        }}
-        .nivel-infantil {{ border-left: 5px solid var(--infantil-color) !important; }}
-        .nivel-fundamental {{ border-left: 5px solid var(--fundamental-color) !important; }}
-        .nivel-medio {{ border-left: 5px solid var(--medio-color) !important; }}
-        
-        .costo-item {{
-            transition: all 0.3s ease;
-            cursor: pointer;
-        }}
-        .costo-item:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }}
-        .costo-seleccionado {{
-            background-color: #e8f4fd !important;
-            border-color: var(--primary-color) !important;
-        }}
-        
-        .hero-section {{
-            background: linear-gradient(135deg, #4361ee 0%, #3a0ca3 100%);
+        body {{ background-color: #f8f9fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
+        .card {{ border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }}
+        .btn-primary {{ background-color: #4361ee; border-color: #4361ee; }}
+        .btn-primary:hover {{ background-color: #3a0ca3; border-color: #3a0ca3; }}
+        .segmento-ei {{ border-left: 5px solid var(--ei-color) !important; }}
+        .segmento-ef-i {{ border-left: 5px solid var(--ef-i-color) !important; }}
+        .segmento-ef-ii {{ border-left: 5px solid var(--ef-ii-color) !important; }}
+        .segmento-em {{ border-left: 5px solid var(--em-color) !important; }}
+        .chart-container {{ position: relative; height: 300px; width: 100%; }}
+        .analise-ia {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 40px;
-            border-radius: 15px;
-            margin-bottom: 30px;
-        }}
-        
-        .badge-nivel {{
-            font-size: 0.8em;
-            padding: 5px 10px;
-            border-radius: 20px;
-        }}
-        .badge-infantil {{ background-color: var(--infantil-color); }}
-        .badge-fundamental {{ background-color: var(--fundamental-color); }}
-        .badge-medio {{ background-color: var(--medio-color); }}
-        
-        footer {{
-            background-color: #2c3e50;
-            color: white;
-            padding: 20px 0;
-            margin-top: 40px;
-        }}
-        
-        .sticky-summary {{
-            position: sticky;
-            top: 20px;
-            background: white;
             border-radius: 10px;
             padding: 20px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }}
+        
+        /* CORREÇÕES DE TABELAS */
+        .table-fixed {{
+            table-layout: fixed;
+            width: 100%;
+        }}
+        
+        .table-fixed th,
+        .table-fixed td {{
+            padding: 12px 10px;
+            vertical-align: middle;
+        }}
+        
+        /* Larguras específicas para cada coluna */
+        .col-nome {{ width: 220px; min-width: 200px; max-width: 250px; }}
+        .col-data {{ width: 100px; min-width: 90px; max-width: 120px; }}
+        .col-participantes {{ width: 90px; min-width: 80px; max-width: 100px; }}
+        .col-investimento {{ width: 130px; min-width: 120px; max-width: 150px; }}
+        .col-receita {{ width: 130px; min-width: 120px; max-width: 150px; }}
+        .col-lucro {{ width: 130px; min-width: 120px; max-width: 150px; }}
+        .col-margem {{ width: 100px; min-width: 90px; max-width: 120px; }}
+        .col-roi {{ width: 100px; min-width: 90px; max-width: 120px; }}
+        .col-payback {{ width: 110px; min-width: 100px; max-width: 130px; }}
+        .col-acoes {{ width: 140px; min-width: 130px; max-width: 160px; }}
+        
+        /* Para tabela de atividades */
+        .col-atividade-nome {{ width: 200px; min-width: 180px; max-width: 250px; }}
+        .col-atividade-segmento {{ width: 140px; min-width: 120px; max-width: 160px; }}
+        .col-atividade-alunos {{ width: 80px; min-width: 70px; max-width: 90px; }}
+        .col-atividade-nao-alunos {{ width: 100px; min-width: 90px; max-width: 110px; }}
+        .col-atividade-receita {{ width: 120px; min-width: 110px; max-width: 130px; }}
+        .col-atividade-custo {{ width: 120px; min-width: 110px; max-width: 130px; }}
+        .col-atividade-lucro {{ width: 120px; min-width: 110px; max-width: 130px; }}
+        .col-atividade-margem {{ width: 100px; min-width: 90px; max-width: 110px; }}
+        
+        /* Overflow controlado */
+        .text-truncate-cell {{
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: block;
+        }}
+        
+        /* Badges com tamanho consistente */
+        .badge-fixed {{
+            display: inline-block;
+            min-width: 75px;
+            text-align: center;
+            padding: 5px 8px;
+            font-size: 0.85em;
+        }}
+        
+        /* Altura uniforme para cards */
+        .card-custo {{
+            min-height: 350px;
+            display: flex;
+            flex-direction: column;
+        }}
+        
+        .card-custo .card-body {{
+            flex-grow: 1;
+            overflow-y: auto;
+        }}
+        
+        @media (max-width: 1200px) {{
+            .col-nome {{ width: 180px; min-width: 160px; }}
+            .col-investimento, .col-receita, .col-lucro {{ width: 110px; min-width: 100px; }}
+        }}
+        
+        @media (max-width: 992px) {{
+            .table-responsive {{
+                font-size: 0.9em;
+            }}
+            .table-fixed th,
+            .table-fixed td {{
+                padding: 8px 6px;
+            }}
+        }}
+        
+        /* Melhorias para a seção de simulação */
+        .atividade-row {{
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }}
+        
+        .custo-calculado {{
+            background-color: #e7f3ff;
+            border-left: 4px solid #007bff;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-size: 0.9em;
+        }}
+        
+        .add-atividade {{
+            background-color: #e9ecef;
+            border: 2px dashed #6c757d;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }}
+        
+        .add-atividade:hover {{
+            background-color: #d4edda;
+            border-color: #28a745;
+        }}
+        
+        /* Estilos para alerts */
+        .recomendacao {{
+            background-color: #d4edda;
+            border-left: 4px solid #28a745;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }}
+        
+        .alerta {{
+            background-color: #f8d7da;
+            border-left: 4px solid #dc3545;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }}
+        
+        .dica {{
+            background-color: #d1ecf1;
+            border-left: 4px solid #17a2b8;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }}
+        
+        .benchmark-card {{
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
         }}
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <nav class="navbar navbar-expand-lg navbar-dark" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
         <div class="container">
             <a class="navbar-brand" href="/">
-                <i class="fas fa-chart-line"></i> Business Plan Escolar
+                <i class="fas fa-robot"></i> Business Plan com IA
             </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav ms-auto">
-                    <li class="nav-item">
-                        <a class="nav-link" href="/">Início</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/simulacao">Nova Simulação</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/dashboard">Dashboard</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/info">
-                            <i class="fas fa-info-circle"></i> Info
-                        </a>
-                    </li>
-                </ul>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/"><i class="fas fa-home"></i> Início</a>
+                <a class="nav-link" href="/simulacao"><i class="fas fa-plus"></i> Nova</a>
+                <a class="nav-link" href="/dashboard"><i class="fas fa-chart-line"></i> Dashboard</a>
+                <a class="nav-link" href="/analise_ia"><i class="fas fa-brain"></i> Análise IA</a>
             </div>
         </div>
     </nav>
@@ -677,9 +317,9 @@ def get_base_html(title="Business Plan Escolar", content=""):
     </div>
 
     <footer class="bg-dark text-white mt-5">
-        <div class="container text-center">
-            <p>Sistema de Business Plan para Escolas - Análise detalhada de custos por nível escolar</p>
-            <p class="mb-0">© 2024 - Desenvolvido com Python, Flask e SQLite</p>
+        <div class="container text-center py-4">
+            <p><i class="fas fa-robot"></i> Sistema com Análise de Inteligência Artificial</p>
+            <p class="mb-0">© 2024 - Análise inteligente de planos de negócios escolares</p>
         </div>
     </footer>
 
@@ -687,955 +327,1446 @@ def get_base_html(title="Business Plan Escolar", content=""):
 </body>
 </html>'''
 
-# Rotas da aplicação
+def formatar_analise_ia(texto_analise: str) -> str:
+    """Formata o texto da análise da IA para HTML"""
+    if not texto_analise:
+        return '<p class="text-muted">Nenhuma análise disponível.</p>'
+    
+    # Substituir markdown por HTML básico
+    html = texto_analise.replace('# ', '<h5>').replace('\n#', '</h5>\n<h5>')
+    html = html.replace('## ', '<h6 class="mt-3">').replace('\n##', '</h6>\n<h6>')
+    html = html.replace('- ', '<li>').replace('\n-', '</li>\n<li>')
+    html = html.replace('**', '<strong>').replace('**', '</strong>')
+    html = html.replace('\n\n', '</p><p>')
+    html = html.replace('\n', '<br>')
+    
+    # Adicionar classes
+    html = html.replace('✅', '<span class="text-success">✅</span>')
+    html = html.replace('⚠️', '<span class="text-warning">⚠️</span>')
+    html = html.replace('🎯', '<span class="text-primary">🎯</span>')
+    html = html.replace('📋', '<span class="text-info">📋</span>')
+    
+    return f'<div class="analise-texto">{html}</div>'
+
 @app.route('/')
 def index():
+    """Página inicial"""
     content = '''
     <div class="row">
-        <div class="col-lg-8 mx-auto text-center">
-            <div class="hero-section">
+        <div class="col-lg-10 mx-auto">
+            <div class="analise-ia text-center">
                 <h1 class="display-4 mb-4">
-                    <i class="fas fa-school"></i> Sistema de Business Plan Escolar
+                    <i class="fas fa-robot"></i> Business Plan com Análise de IA
                 </h1>
                 <p class="lead mb-4">
-                    Ferramenta avançada para análise de custo-benefício com <strong>custos específicos por nível escolar</strong>
-                    visando aumentar em <strong>10% a 50%</strong> o número de matrículas.
+                    Crie seu plano de negócios escolar e receba análise inteligente com recomendações personalizadas
                 </p>
-                <div class="row mt-5">
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-primary">
+                <div class="row mt-4">
+                    <div class="col-md-4">
+                        <div class="card bg-white text-dark">
                             <div class="card-body">
-                                <i class="fas fa-baby fa-3x text-primary mb-3"></i>
-                                <h4>Educação Infantil</h4>
-                                <p>Custos específicos para berçário ao infantil</p>
+                                <i class="fas fa-brain fa-3x mb-3" style="color: #667eea;"></i>
+                                <h5>Análise Inteligente</h5>
+                                <p>IA analisa seu plano e sugere melhorias</p>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-success">
+                    <div class="col-md-4">
+                        <div class="card bg-white text-dark">
                             <div class="card-body">
-                                <i class="fas fa-graduation-cap fa-3x text-success mb-3"></i>
-                                <h4>Fundamental I</h4>
-                                <p>Anos iniciais do ensino fundamental</p>
+                                <i class="fas fa-chart-line fa-3x mb-3" style="color: #4ECDC4;"></i>
+                                <h5>Benchmarks</h5>
+                                <p>Compare com padrões do setor</p>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-info">
+                    <div class="col-md-4">
+                        <div class="card bg-white text-dark">
                             <div class="card-body">
-                                <i class="fas fa-book fa-3x text-info mb-3"></i>
-                                <h4>Fundamental II</h4>
-                                <p>Anos finais do ensino fundamental</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card mb-4 border-warning">
-                            <div class="card-body">
-                                <i class="fas fa-university fa-3x text-warning mb-3"></i>
-                                <h4>Ensino Médio</h4>
-                                <p>Preparação para vestibular e ENEM</p>
+                                <i class="fas fa-lightbulb fa-3x mb-3" style="color: #FF9F1C;"></i>
+                                <h5>Recomendações</h5>
+                                <p>Planos de ação personalizados</p>
                             </div>
                         </div>
                     </div>
                 </div>
-                
-                <a href="/simulacao" class="btn btn-primary btn-lg mt-4">
-                    <i class="fas fa-play-circle"></i> Iniciar Nova Simulação
+                <a href="/simulacao" class="btn btn-light btn-lg mt-4">
+                    <i class="fas fa-rocket"></i> Começar Agora
                 </a>
             </div>
-        </div>
-    </div>
-
-    <div class="row mt-5">
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-header bg-info text-white">
-                    <h4><i class="fas fa-bullseye"></i> Novas Funcionalidades</h4>
+            
+            <div class="card mt-4">
+                <div class="card-header bg-primary text-white">
+                    <h4 class="mb-0"><i class="fas fa-info-circle"></i> Como funciona a análise de IA</h4>
                 </div>
                 <div class="card-body">
-                    <ul class="list-group list-group-flush">
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Custos por nível escolar</strong> - Infantil, Fundamental I/II, Médio
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Seleção de atividades específicas</strong> por nível
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Custos detalhados por categoria</strong> - Infraestrutura, Material, etc.
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Cálculo automático de professores</strong> necessários
-                        </li>
-                        <li class="list-group-item">
-                            <i class="fas fa-check-circle text-success"></i>
-                            <strong>Seleção de itens de custo</strong> personalizável
-                        </li>
-                    </ul>
-                </div>
-            </div>
-        </div>
-        
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-header bg-success text-white">
-                    <h4><i class="fas fa-chart-pie"></i> Análise Detalhada de Custos</h4>
-                </div>
-                <div class="card-body">
-                    <div class="alert alert-success">
-                        <strong>Infraestrutura específica:</strong> Brinquedoteca, laboratórios, quadras
-                    </div>
-                    <div class="alert alert-info">
-                        <strong>Materiais por aluno:</strong> Kits de atividades, uniformes, livros
-                    </div>
-                    <div class="alert alert-warning">
-                        <strong>Recursos humanos:</strong> Professores especializados, capacitação
-                    </div>
-                    <div class="alert alert-primary">
-                        <strong>Marketing segmentado:</strong> Divulgação por público-alvo
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h5><i class="fas fa-check-circle text-success"></i> O que a IA analisa:</h5>
+                            <ul>
+                                <li>Rentabilidade do projeto</li>
+                                <li>Estrutura de custos</li>
+                                <li>Precificação adequada</li>
+                                <li>Alocação de recursos</li>
+                                <li>Riscos e oportunidades</li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h5><i class="fas fa-bullseye text-warning"></i> Benefícios:</h5>
+                            <ul>
+                                <li>Detecção de problemas antecipada</li>
+                                <li>Otimização de custos</li>
+                                <li>Maximização de receitas</li>
+                                <li>Plano de ação específico</li>
+                                <li>Comparação com mercado</li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
     '''
-    return get_base_html("Business Plan Escolar - Início", content)
+    return get_base_html("Business Plan com IA", content)
 
 @app.route('/simulacao')
-def simulacao():
-    # Gerar opções de atividades por nível
-    atividades_options = ""
-    for nivel, config in CUSTOS_POR_NIVEL.items():
-        atividades_options += f'<optgroup label="{nivel.replace("_", " ").title()}">'
-        for atividade in config['atividades_especificas']:
-            atividades_options += f'<option value="{atividade}">{atividade}</option>'
-        atividades_options += '</optgroup>'
+@app.route('/simulacao/<int:simulacao_id>')
+def simulacao(simulacao_id=None):
+    """Página de simulação"""
+    modo_edicao = simulacao_id is not None
+    dados_edicao = {}
     
-    # Gerar opções de infraestrutura
-    infra_options = ""
-    for item in CATEGORIAS_CUSTOS['infraestrutura']['itens']:
-        infra_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'infra')">
-            <input class="form-check-input" type="checkbox" name="infra_itens" value="{item['nome']}" id="infra_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="infra_{item['nome'].replace(' ', '_')}">
-                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}
-                <small class="d-block text-muted">{item.get('descricao', '')}</small>
-            </label>
+    if modo_edicao:
+        try:
+            conn = sqlite3.connect(DATABASE)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM simulacoes WHERE id = ?', (simulacao_id,))
+            simulacao = cursor.fetchone()
+            if simulacao:
+                dados_completos = json.loads(simulacao['dados_completos'])
+                dados_edicao = {
+                    'id': simulacao_id,
+                    'nome': simulacao['nome'],
+                    'dados_entrada': dados_completos.get('entrada', {}),
+                    'resultados': dados_completos.get('resultados', {}),
+                    'atividades': dados_completos.get('atividades', []),
+                    'custos': dados_completos.get('custos', {}),
+                    'meses_analise': dados_completos.get('entrada', {}).get('meses_analise', 24)
+                }
+            conn.close()
+        except Exception as e:
+            print(f"Erro ao carregar: {e}")
+            return redirect('/dashboard')
+    
+    # HTML dos segmentos
+    segmentos_html = ""
+    for sigla, info in SEGMENTOS.items():
+        segmentos_html += f'''
+        <div class="col-md-6 mb-4">
+            <div class="card segmento-card segmento-{sigla.replace('_', '-')}">
+                <div class="card-header" style="background-color: {info['cor']}; color: white;">
+                    <h5 class="mb-0"><i class="fas fa-graduation-cap"></i> {info['nome']}</h5>
+                    <small>{info['descricao']}</small>
+                </div>
+                <div class="card-body">
+                    <div id="atividades_container_{sigla}" class="mb-3">
+                        <!-- Atividades serão adicionadas aqui -->
+                    </div>
+                    <div class="add-atividade mb-3" onclick="adicionarAtividade('{sigla}')">
+                        <i class="fas fa-plus-circle fa-2x text-success mb-2"></i>
+                        <p class="mb-0">Adicionar atividade</p>
+                    </div>
+                </div>
+            </div>
         </div>
         '''
     
-    # Gerar opções de material
-    material_options = ""
-    for item in CATEGORIAS_CUSTOS['material']['itens']:
-        por_aluno = " (por aluno)" if item.get('por_aluno', False) else ""
-        material_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'material')">
-            <input class="form-check-input" type="checkbox" name="material_itens" value="{item['nome']}" id="material_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="material_{item['nome'].replace(' ', '_')}">
-                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}{por_aluno}
-            </label>
+    # HTML dos custos - VERSÃO CORRIGIDA
+    campos_custos = ""
+    categorias = {
+        'investimento_inicial': ('info', 'Investimento Inicial'),
+        'custos_mensais_fixos': ('warning', 'Custos Mensais Fixos'),
+        'custos_mensais_variaveis': ('primary', 'Custos Variáveis'),
+        'marketing': ('success', 'Marketing'),
+        'recursos_humanos': ('danger', 'Recursos Humanos')
+    }
+    
+    # Mapeamento de ícones
+    icons_map = {
+        'investimento_inicial': 'tools',
+        'custos_mensais_fixos': 'dollar-sign',
+        'custos_mensais_variaveis': 'shopping-cart',
+        'marketing': 'bullhorn',
+        'recursos_humanos': 'users'
+    }
+    
+    for categoria, (cor, titulo) in categorias.items():
+        campos_custos += f'''
+        <div class="col-md-6 mb-4">
+            <div class="card card-custo h-100">
+                <div class="card-header bg-{cor} text-white">
+                    <h5 class="mb-0"><i class="fas fa-{icons_map.get(categoria, "question-circle")}"></i> {titulo}</h5>
+                </div>
+                <div class="card-body">
+        '''
+        
+        for item in CATEGORIAS_CUSTOS[categoria]:
+            campo_id = f"{categoria}_{item.replace(' ', '_').lower()}"
+            is_mensal = 'mensais' in categoria
+            valor_edicao = 0
+            if dados_edicao.get('custos', {}).get(categoria, {}).get(item, {}):
+                valor_edicao = dados_edicao['custos'][categoria][item].get('valor', 0)
+            
+            campos_custos += f'''
+            <div class="mb-3">
+                <label class="form-label">{item}:</label>
+                <div class="input-group">
+                    <span class="input-group-text">R$</span>
+                    <input type="number" class="form-control campo-custo" 
+                           id="{campo_id}" data-categoria="{categoria}"
+                           data-item="{item}" data-mensal="{str(is_mensal).lower()}"
+                           value="{valor_edicao}" min="0" step="10">
+                    <span class="input-group-text">{'/mês' if is_mensal else ''}</span>
+                </div>
+            </div>
+            '''
+        
+        campos_custos += '''
+                </div>
+            </div>
         </div>
         '''
     
-    # Gerar opções de marketing
-    marketing_options = ""
-    for item in CATEGORIAS_CUSTOS['marketing']['itens']:
-        marketing_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'marketing')">
-            <input class="form-check-input" type="checkbox" name="marketing_itens" value="{item['nome']}" id="marketing_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="marketing_{item['nome'].replace(' ', '_')}">
-                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}
-                <small class="d-block text-muted">{item.get('descricao', '')}</small>
-            </label>
-        </div>
-        '''
-    
-    # Gerar opções de RH
-    rh_options = ""
-    for item in CATEGORIAS_CUSTOS['recursos_humanos']['itens']:
-        rh_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'rh')">
-            <input class="form-check-input" type="checkbox" name="rh_itens" value="{item['nome']}" id="rh_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="rh_{item['nome'].replace(' ', '_')}">
-                <strong>{item['nome']}</strong> - R$ {item['custo_base']:,.0f}
-                <small class="d-block text-muted">{item.get('descricao', '')}</small>
-            </label>
-        </div>
-        '''
-    
-    # Gerar opções de custos mensais
-    custos_mensais_options = ""
-    for item in CATEGORIAS_CUSTOS['custos_mensais']['itens']:
-        custos_mensais_options += f'''
-        <div class="form-check mb-2 costo-item" onclick="toggleCostoItem(this, 'custos_mensais')">
-            <input class="form-check-input" type="checkbox" name="custos_mensais_itens" value="{item['nome']}" id="mensal_{item['nome'].replace(' ', '_')}">
-            <label class="form-check-label" for="mensal_{item['nome'].replace(' ', '_')}">
-                <strong>{item['nome']}</strong> - R$ {item['custo_mensal']:,.0f}/mês
-                <small class="d-block text-muted">{item.get('descricao', '')}</small>
-            </label>
-        </div>
-        '''
+    botao_acao = "Calcular e Analisar com IA" if not modo_edicao else "Atualizar e Reanalisar"
+    acao_js = f"calcularSimulacao({simulacao_id if modo_edicao else 'null'})"
     
     content = f'''
     <div class="row">
-        <div class="col-lg-10 mx-auto">
+        <div class="col-lg-12">
             <div class="card shadow">
-                <div class="card-header bg-primary text-white">
-                    <h3 class="mb-0"><i class="fas fa-calculator"></i> Simulação Detalhada de Business Plan</h3>
-                    <p class="mb-0">Configure os custos específicos por nível escolar e atividades</p>
+                <div class="card-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                    <h3 class="mb-0"><i class="fas fa-calculator"></i> {'Editar Simulação' if modo_edicao else 'Nova Simulação'} com IA</h3>
                 </div>
                 <div class="card-body">
                     <form id="simulacaoForm">
-                        <div class="row">
+                        <!-- Configuração -->
+                        <div class="row mb-4">
                             <div class="col-md-6">
-                                <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-school"></i> Dados da Escola
-                                </h4>
-                                
                                 <div class="mb-3">
-                                    <label class="form-label">Nível Escolar:</label>
-                                    <select class="form-select" id="nivel_escolar" onchange="atualizarCustosPorNivel()" required>
-                                        <option value="infantil">Educação Infantil</option>
-                                        <option value="fundamental_i" selected>Ensino Fundamental I (1º ao 5º ano)</option>
-                                        <option value="fundamental_ii">Ensino Fundamental II (6º ao 9º ano)</option>
-                                        <option value="medio">Ensino Médio</option>
-                                    </select>
-                                    <div class="form-text">Selecione o nível escolar para cálculos específicos</div>
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label">Número atual de alunos:</label>
-                                    <input type="number" class="form-control" id="alunos_atuais" 
-                                           placeholder="Ex: 200" min="1" required>
-                                    <div class="form-text">Total de alunos matriculados atualmente</div>
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label">Receita por aluno da escola (R$/mês):</label>
-                                    <input type="number" class="form-control" id="receita_alunos_atividade" 
-                                           placeholder="Ex: 150" min="10" step="10" required>
-                                    <div class="form-text">Valor mensal de atividade para alunos matriculados</div>
-                                </div>
-
-                                <div class="mb-3">
-                                    <label class="form-label">Receita por não-aluno (R$/mês):</label>
-                                    <input type="number" class="form-control" id="receita_nao_alunos_atividade" 
-                                           placeholder="Ex: 200" min="10" step="10" required>
-                                    <div class="form-text">Valor mensal de atividade para participantes externos</div>
-                                </div>
-
-                                <hr class="my-4">
-
-                                <h5 class="mb-3 text-primary"><i class="fas fa-users"></i> <strong>Participantes nas Atividades</strong></h5>
-
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Total de Alunos da Escola:</strong></label>
-                                    <input type="number" class="form-control" id="quantidade_alunos_atividade" 
-                                           placeholder="Ex: 80" min="0" required>
-                                    <div class="form-text">Quantos alunos da escola participarão das atividades selecionadas (no total)?</div>
-                                </div>
-
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Total de Não-Alunos (Externos):</strong></label>
-                                    <input type="number" class="form-control" id="quantidade_nao_alunos_atividade" 
-                                           placeholder="Ex: 30" min="0" required>
-                                    <div class="form-text">Quantas pessoas de fora participarão das atividades selecionadas (no total)?</div>
-                                </div>
-
-                                <div class="alert alert-info mt-3">
-                                    <small><i class="fas fa-info-circle"></i> <strong>Nota:</strong> Estas quantidades se aplicam a TODAS as atividades selecionadas. Exemplo: se selecionar 3 atividades e colocar 80 alunos, significa que há 80 alunos participando em média entre as 3 atividades.</small>
-                                </div>
-
-                                <hr class="my-4">
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Aumento esperado de matrículas:</strong></label>
-                                    <div class="row">
-                                        <div class="col-md-8">
-                                            <input type="range" class="form-range" id="aumento_esperado_range" 
-                                                   min="10" max="50" step="5" value="10">
-                                        </div>
-                                        <div class="col-md-4">
-                                            <div class="input-group">
-                                                <input type="number" class="form-control" id="aumento_esperado_input" 
-                                                       min="10" max="50" step="5" value="10" placeholder="10">
-                                                <span class="input-group-text">%</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <span class="form-text">Meta: 10% a 50% (recomendado pela gestão)</span>
-                                    <input type="hidden" id="aumento_esperado" value="10">
+                                    <label class="form-label">Nome da Simulação:</label>
+                                    <input type="text" class="form-control" id="nome_simulacao" 
+                                           value="{dados_edicao.get('nome', 'Meu Plano Escolar')}">
                                 </div>
                             </div>
-                            
                             <div class="col-md-6">
-                                <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-chalkboard-teacher"></i> Atividades Extracurriculares
-                                </h4>
-                                
                                 <div class="mb-3">
-                                    <label class="form-label">Selecione as atividades:</label>
-                                    <select class="form-select" id="atividades_selecionadas" multiple size="6">
-                                        {atividades_options}
+                                    <label class="form-label">Meses para análise:</label>
+                                    <select class="form-select" id="meses_analise">
+                                        <option value="12">12 meses</option>
+                                        <option value="24" selected>24 meses</option>
+                                        <option value="36">36 meses</option>
+                                        <option value="60">60 meses</option>
                                     </select>
-                                    <div class="form-text">Pressione Ctrl para selecionar múltiplas atividades</div>
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label">Horas semanais por atividade:</label>
-                                    <input type="number" class="form-control" id="horas_semanais" 
-                                           placeholder="Ex: 10" min="5" step="1" required>
-                                    <div class="form-text">Horas totais de atividades por semana</div>
-                                </div>
-                                
-                                <div class="alert alert-info">
-                                    <i class="fas fa-info-circle"></i>
-                                    <strong>Dicas:</strong>
-                                    <ul class="mb-0 mt-2">
-                                        <li>Infantil: Recomendado 2-3 atividades</li>
-                                        <li>Fundamental: Recomendado 3-4 atividades</li>
-                                        <li>Médio: Recomendado 4-5 atividades</li>
-                                    </ul>
                                 </div>
                             </div>
                         </div>
                         
-                        <div class="row mt-4">
+                        <!-- Atividades -->
+                        <div class="row mb-4">
                             <div class="col-12">
                                 <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-tools"></i> Custos de Infraestrutura
+                                    <i class="fas fa-tasks"></i> Atividades por Segmento
+                                </h4>
+                                <p class="text-muted">A IA analisará cada atividade separadamente.</p>
+                                <div class="row">
+                                    {segmentos_html}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Custos -->
+                        <div class="row mb-4">
+                            <div class="col-12">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-money-bill-wave"></i> Custos do Projeto
                                 </h4>
                                 <div class="row">
-                                    <div class="col-md-6">
-                                        {infra_options}
+                                    {campos_custos}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Resumo e IA -->
+                        <div class="row">
+                            <div class="col-md-5">
+                                <div class="card">
+                                    <div class="card-header bg-success text-white">
+                                        <h5 class="mb-0"><i class="fas fa-chart-line"></i> Resumo Financeiro</h5>
                                     </div>
-                                    <div class="col-md-6">
-                                        <div class="card">
-                                            <div class="card-body">
-                                                <h6><i class="fas fa-lightbulb"></i> Recomendações por Nível</h6>
-                                                <div id="recomendacoes_infra">
-                                                    <p class="mb-2"><strong>Infantil:</strong> Brinquedoteca, Parque infantil</p>
-                                                    <p class="mb-2"><strong>Fundamental:</strong> Laboratório, Quadra</p>
-                                                    <p class="mb-2"><strong>Médio:</strong> Laboratório avançado, Estúdio</p>
-                                                </div>
-                                            </div>
+                                    <div class="card-body">
+                                        <div id="resumo_simulacao">
+                                            <p class="text-center text-muted">Preencha os dados para ver o resumo</p>
+                                        </div>
+                                        <div class="mt-3">
+                                            <button type="button" class="btn btn-primary w-100 mb-2" onclick="{acao_js}">
+                                                <i class="fas fa-robot"></i> {botao_acao}
+                                            </button>
+                                            <button type="button" class="btn btn-outline-secondary w-100 mb-2" onclick="resetForm()">
+                                                <i class="fas fa-redo"></i> Limpar
+                                            </button>
+                                            <button type="button" class="btn btn-outline-info w-100" onclick="carregarExemploIA()">
+                                                <i class="fas fa-magic"></i> Exemplo com IA
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
                             </div>
-                        </div>
-                        
-                        <div class="row mt-4">
-                            <div class="col-md-6">
-                                <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-book"></i> Materiais e Equipamentos
-                                </h4>
-                                {material_options}
-                            </div>
                             
-                            <div class="col-md-6">
-                                <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-bullhorn"></i> Marketing e Divulgação
-                                </h4>
-                                {marketing_options}
-                            </div>
-                        </div>
-                        
-                        <div class="row mt-4">
-                            <div class="col-md-6">
-                                <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-users"></i> Recursos Humanos
-                                </h4>
-                                {rh_options}
-                            </div>
-                            
-                            <div class="col-md-6">
-                                <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-dollar-sign"></i> Custos Mensais Operacionais
-                                </h4>
-                                <div class="alert alert-info">
-                                    <small><i class="fas fa-info-circle"></i> Estes custos serão deduzidos da receita mensal</small>
+                            <div class="col-md-7">
+                                <div id="analise_rapida" class="mb-3">
+                                    <!-- Análise rápida em tempo real -->
                                 </div>
-                                {custos_mensais_options}
-                            </div>
-                        </div>
-                        
-                        <div class="row mt-4">
-                            <div class="col-md-6">
-                            </div>
-                            
-                            <div class="col-md-6">
-                                <h4 class="border-bottom pb-2 mb-3">
-                                    <i class="fas fa-calculator"></i> Resumo de Custos
-                                </h4>
-                                <div class="sticky-summary">
-                                    <h5>Estimativa de Investimento</h5>
-                                    <div id="resumo_custos">
-                                        <p>Selecione itens para ver a estimativa</p>
-                                    </div>
-                                    <div class="mt-3">
-                                        <div class="mb-3">
-                                            <label class="form-label">Outros custos (R$):</label>
-                                            <input type="number" class="form-control" id="outros_custos" 
-                                                   value="200" min="0" step="50">
-                                        </div>
-                                    </div>
+                                <div id="graficos_container">
+                                    <!-- Gráficos -->
                                 </div>
-                            </div>
-                        </div>
-                        
-                        <div class="row mt-4">
-                            <div class="col-12 text-center">
-                                <button type="button" class="btn btn-primary btn-lg" 
-                                        onclick="calcularSimulacao()" id="btnCalcular">
-                                    <i class="fas fa-calculator"></i> Calcular Projeção Detalhada
-                                </button>
-                                <button type="button" class="btn btn-secondary btn-lg ms-2" onclick="resetForm()">
-                                    <i class="fas fa-redo"></i> Limpar Tudo
-                                </button>
                             </div>
                         </div>
                     </form>
-                    
-                    <div class="row mt-5">
-                        <div class="col-12">
-                            <div id="resultado" style="display: none;">
-                                <!-- Resultados serão inseridos aqui via JavaScript -->
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>
     </div>
 
+    <!-- Template atividade -->
+    <template id="template-atividade">
+        <div class="atividade-row">
+            <div class="row">
+                <div class="col-11">
+                    <h6><i class="fas fa-dumbbell"></i> <span class="nome-atividade">Nova Atividade</span></h6>
+                </div>
+                <div class="col-1 text-end">
+                    <i class="fas fa-times text-danger" style="cursor: pointer;" onclick="removerAtividade(this)"></i>
+                </div>
+            </div>
+            <div class="row g-2">
+                <div class="col-md-6">
+                    <input type="text" class="form-control form-control-sm mb-2 nome-atividade-input" placeholder="Nome da atividade" value="Nova Atividade">
+                </div>
+                <div class="col-md-6">
+                    <input type="number" class="form-control form-control-sm mb-2 custo-hora" placeholder="Custo/hora professor" value="50">
+                </div>
+                <div class="col-md-4">
+                    <input type="number" class="form-control form-control-sm mb-2 horas-semanais" placeholder="Horas/semana" value="4">
+                </div>
+                <div class="col-md-4">
+                    <input type="number" class="form-control form-control-sm mb-2 semanas-mes" placeholder="Semanas/mês" value="4">
+                </div>
+                <div class="col-md-4">
+                    <input type="number" class="form-control form-control-sm mb-2 custo-material" placeholder="Custo material/mês" value="100">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 alunos" placeholder="Alunos" value="10">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 nao-alunos" placeholder="Não-alunos" value="5">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 receita-aluno" placeholder="Receita aluno/mês" value="150">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 receita-nao-aluno" placeholder="Receita não-aluno/mês" value="200">
+                </div>
+            </div>
+            <div class="custo-calculado mt-2 p-2">
+                <div class="row small">
+                    <div class="col-6">
+                        <strong>Custo mensal:</strong><br>
+                        <span class="custo-mensal-atividade">R$ 900,00</span>
+                    </div>
+                    <div class="col-6">
+                        <strong>Receita mensal:</strong><br>
+                        <span class="receita-mensal-atividade">R$ 2.500,00</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
     <script>
     document.addEventListener('DOMContentLoaded', function() {{
-        // Configurar eventos do slider e input de aumento esperado
-        const rangeInput = document.getElementById('aumento_esperado_range');
-        const textInput = document.getElementById('aumento_esperado_input');
-        const hiddenInput = document.getElementById('aumento_esperado');
-        
-        // Quando o slider muda, atualizar o input de texto e o hidden
-        rangeInput.addEventListener('input', function() {{
-            textInput.value = this.value;
-            hiddenInput.value = this.value;
-            atualizarResumo();
-        }});
-        
-        // Quando o input de texto muda, atualizar o slider e o hidden
-        textInput.addEventListener('input', function() {{
-            let valor = parseInt(this.value);
-            // Validar range
-            if (valor < 10) valor = 10;
-            if (valor > 50) valor = 50;
-            if (isNaN(valor)) valor = 10;
-            
-            this.value = valor;
-            rangeInput.value = valor;
-            hiddenInput.value = valor;
-            atualizarResumo();
+        // Adicionar uma atividade inicial em cada segmento
+        Object.keys({json.dumps(SEGMENTOS)}).forEach(seg => {{
+            adicionarAtividade(seg, true);
         }});
         
         // Configurar eventos
-        document.getElementById('alunos_atuais').addEventListener('input', atualizarResumo);
-        document.getElementById('mensalidade_media').addEventListener('input', atualizarResumo);
-        
-        // Configurar seleção de itens de custo
-        document.querySelectorAll('.costo-item input[type="checkbox"]').forEach(checkbox => {{
-            checkbox.addEventListener('change', atualizarResumo);
+        document.getElementById('nome_simulacao').addEventListener('input', atualizarResumoIA);
+        document.getElementById('meses_analise').addEventListener('change', atualizarResumoIA);
+        document.querySelectorAll('.campo-custo').forEach(campo => {{
+            campo.addEventListener('input', atualizarResumoIA);
         }});
         
-        atualizarResumo();
+        atualizarResumoIA();
     }});
     
-    function toggleCostoItem(element, tipo) {{
-        const checkbox = element.querySelector('input[type="checkbox"]');
-        checkbox.checked = !checkbox.checked;
-        element.classList.toggle('costo-seleccionado', checkbox.checked);
-        atualizarResumo();
+    function adicionarAtividade(segmento, inicial = false) {{
+        const container = document.getElementById(`atividades_container_${{segmento}}`);
+        const template = document.getElementById('template-atividade').content.cloneNode(true);
+        
+        // Configurar eventos
+        const campos = template.querySelectorAll('input');
+        campos.forEach(campo => {{
+            campo.addEventListener('input', function() {{
+                if (this.classList.contains('nome-atividade-input')) {{
+                    this.closest('.atividade-row').querySelector('.nome-atividade').textContent = this.value;
+                }}
+                calcularAtividade(this.closest('.atividade-row'));
+                atualizarResumoIA();
+            }});
+        }});
+        
+        container.appendChild(template);
+        if (!inicial) {{
+            calcularAtividade(container.lastElementChild);
+            atualizarResumoIA();
+        }}
     }}
     
-    function atualizarCustosPorNivel() {{
-        const nivel = document.getElementById('nivel_escolar').value;
-        let recomendacoes = '';
+    function removerAtividade(elemento) {{
+        elemento.closest('.atividade-row').remove();
+        atualizarResumoIA();
+    }}
+    
+    function calcularAtividade(atividadeRow) {{
+        const custoHora = parseFloat(atividadeRow.querySelector('.custo-hora').value) || 0;
+        const horasSemanais = parseFloat(atividadeRow.querySelector('.horas-semanais').value) || 0;
+        const semanasMes = parseFloat(atividadeRow.querySelector('.semanas-mes').value) || 4;
+        const custoMaterial = parseFloat(atividadeRow.querySelector('.custo-material').value) || 0;
+        const alunos = parseInt(atividadeRow.querySelector('.alunos').value) || 0;
+        const naoAlunos = parseInt(atividadeRow.querySelector('.nao-alunos').value) || 0;
+        const receitaAluno = parseFloat(atividadeRow.querySelector('.receita-aluno').value) || 0;
+        const receitaNaoAluno = parseFloat(atividadeRow.querySelector('.receita-nao-aluno').value) || 0;
         
-        switch(nivel) {{
-            case 'infantil':
-                recomendacoes = '<p class="mb-2"><strong>Infantil:</strong> Brinquedoteca, Parque infantil, Sala multiuso</p>';
-                break;
-            case 'fundamental_i':
-                recomendacoes = '<p class="mb-2"><strong>Fundamental I:</strong> Laboratório de informática, Quadra, Biblioteca</p>';
-                break;
-            case 'fundamental_ii':
-                recomendacoes = '<p class="mb-2"><strong>Fundamental II:</strong> Laboratório de ciências, Estúdio de música, Sala de estudos</p>';
-                break;
-            case 'medio':
-                recomendacoes = '<p class="mb-2"><strong>Médio:</strong> Laboratório avançado, Sala de projeção, Espaço coworking</p>';
-                break;
+        const custoProfessorMensal = custoHora * horasSemanais * semanasMes;
+        const custoMensalTotal = custoProfessorMensal + custoMaterial;
+        const receitaMensal = (alunos * receitaAluno) + (naoAlunos * receitaNaoAluno);
+        
+        atividadeRow.querySelector('.custo-mensal-atividade').textContent = 
+            `R$ ${{custoMensalTotal.toLocaleString('pt-BR')}}`;
+        atividadeRow.querySelector('.receita-mensal-atividade').textContent = 
+            `R$ ${{receitaMensal.toLocaleString('pt-BR')}}`;
+        
+        return {{ custoMensal: custoMensalTotal, receitaMensal: receitaMensal, alunos: alunos, naoAlunos: naoAlunos }};
+    }}
+    
+    function atualizarResumoIA() {{
+        // Coletar dados
+        let totalAlunos = 0, totalNaoAlunos = 0, receitaTotal = 0, custoAtividadesTotal = 0;
+        const atividades = [];
+        
+        Object.keys({json.dumps(SEGMENTOS)}).forEach(segmento => {{
+            const container = document.getElementById(`atividades_container_${{segmento}}`);
+            if (!container) return;
+            
+            const atividadesRows = container.querySelectorAll('.atividade-row');
+            atividadesRows.forEach(row => {{
+                const dados = calcularAtividade(row);
+                atividades.push({{
+                    segmento: segmento,
+                    nome: row.querySelector('.nome-atividade-input').value,
+                    ...dados
+                }});
+                
+                totalAlunos += dados.alunos;
+                totalNaoAlunos += dados.naoAlunos;
+                receitaTotal += dados.receitaMensal;
+                custoAtividadesTotal += dados.custoMensal;
+            }});
+        }});
+        
+        // Custos gerais
+        let investimentoTotal = 0, custoMensalTotal = custoAtividadesTotal;
+        document.querySelectorAll('.campo-custo').forEach(campo => {{
+            const valor = parseFloat(campo.value) || 0;
+            if (campo.getAttribute('data-mensal') === 'true') {{
+                custoMensalTotal += valor;
+            }} else {{
+                investimentoTotal += valor;
+            }}
+        }});
+        
+        // Indicadores
+        const lucroMensal = receitaTotal - custoMensalTotal;
+        const margemLucro = receitaTotal > 0 ? (lucroMensal / receitaTotal) * 100 : 0;
+        const mesesAnalise = parseInt(document.getElementById('meses_analise').value) || 24;
+        let paybackMeses = 0, roiPercentual = 0;
+        
+        if (lucroMensal > 0 && investimentoTotal > 0) {{
+            paybackMeses = investimentoTotal / lucroMensal;
+            roiPercentual = ((lucroMensal * mesesAnalise) / investimentoTotal) * 100;
         }}
         
-        document.getElementById('recomendacoes_infra').innerHTML = recomendacoes;
-        atualizarResumo();
+        // Atualizar resumo
+        document.getElementById('resumo_simulacao').innerHTML = `
+            <table class="table table-sm">
+                <tr><td>Atividades:</td><td class="text-end"><span class="badge bg-primary">${{atividades.length}}</span></td></tr>
+                <tr><td>Participantes:</td><td class="text-end"><strong>${{totalAlunos + totalNaoAlunos}}</strong></td></tr>
+                <tr><td>Receita mensal:</td><td class="text-end text-success">R$ ${{receitaTotal.toLocaleString('pt-BR')}}</td></tr>
+                <tr><td>Custo mensal:</td><td class="text-end text-danger">R$ ${{custoMensalTotal.toLocaleString('pt-BR')}}</td></tr>
+                <tr><td>Investimento:</td><td class="text-end">R$ ${{investimentoTotal.toLocaleString('pt-BR')}}</td></tr>
+                <tr class="table-info"><td><strong>Lucro mensal:</strong></td><td class="text-end"><strong>R$ ${{lucroMensal.toLocaleString('pt-BR')}}</strong></td></tr>
+                <tr><td>Margem de lucro:</td><td class="text-end"><span class="badge ${{margemLucro >= 30 ? 'bg-success' : margemLucro >= 15 ? 'bg-warning' : 'bg-danger'}}">${{margemLucro.toFixed(1)}}%</span></td></tr>
+                <tr><td>ROI (${{mesesAnalise}} meses):</td><td class="text-end"><span class="badge ${{roiPercentual >= 100 ? 'bg-success' : roiPercentual >= 50 ? 'bg-warning' : 'bg-danger'}}">${{roiPercentual.toFixed(1)}}%</span></td></tr>
+            </table>
+        `;
+        
+        // Análise rápida da IA
+        fazerAnaliseRapida({{
+            lucroMensal: lucroMensal,
+            margemLucro: margemLucro,
+            roiPercentual: roiPercentual,
+            paybackMeses: paybackMeses,
+            investimentoTotal: investimentoTotal,
+            atividadesCount: atividades.length
+        }});
+        
+        atualizarGraficos(atividades);
     }}
     
-    function atualizarResumo() {{
-        const alunos = parseInt(document.getElementById('alunos_atuais').value) || 0;
-        const receitaAlunos = parseFloat(document.getElementById('receita_alunos_atividade').value) || 0;
-        const receitaNaoAlunos = parseFloat(document.getElementById('receita_nao_alunos_atividade').value) || 0;
-        const percentualAlunos = parseInt(document.getElementById('percentual_alunos_escola').value) || 70;
-        const aumento = parseInt(document.getElementById('aumento_esperado').value) || 0;
-        const nivel = document.getElementById('nivel_escolar').value;
+    function fazerAnaliseRapida(dados) {{
+        const container = document.getElementById('analise_rapida');
+        let analiseHTML = '<div class="card"><div class="card-header bg-info text-white"><h6 class="mb-0"><i class="fas fa-bolt"></i> Análise Rápida</h6></div><div class="card-body">';
         
-        // Calcular novos alunos
-        const novosAlunos = Math.round(alunos * (aumento / 100));
-        const totalAlunos = alunos + novosAlunos;
+        // Análise baseada em benchmarks
+        if (dados.margemLucro < 15) {{
+            analiseHTML += `<div class="alerta"><i class="fas fa-exclamation-triangle"></i> <strong>Atenção:</strong> Margem de lucro baixa (${{dados.margemLucro.toFixed(1)}}%). Considere aumentar receitas ou reduzir custos.</div>`;
+        }} else if (dados.margemLucro >= 30) {{
+            analiseHTML += `<div class="recomendacao"><i class="fas fa-check-circle"></i> <strong>Excelente:</strong> Margem de lucro saudável (${{dados.margemLucro.toFixed(1)}}%).</div>`;
+        }}
         
-        // Calcular receita mensal
-        const percentNaoAlunos = 100 - percentualAlunos;
-        const alunosAtividadeCount = Math.round(novosAlunos * (percentualAlunos / 100));
-        const naoAlunosCount = Math.round(novosAlunos * (percentNaoAlunos / 100));
-        const receitaMensal = (alunosAtividadeCount * receitaAlunos) + (naoAlunosCount * receitaNaoAlunos);
+        if (dados.roiPercentual < 50) {{
+            analiseHTML += `<div class="alerta"><i class="fas fa-exclamation-triangle"></i> ROI abaixo do ideal (${{dados.roiPercentual.toFixed(1)}}%). Investimento pode ser muito alto para o retorno.</div>`;
+        }}
         
-        // Calcular custos selecionados
-        let custoTotal = 0;
-        const custosDetalhados = {{}};
+        if (dados.paybackMeses > 36 && dados.paybackMeses > 0) {{
+            analiseHTML += `<div class="alerta"><i class="fas fa-clock"></i> Payback muito longo (${{dados.paybackMeses.toFixed(1)}} meses). Considere reduzir investimento inicial.</div>`;
+        }}
         
-        // Infraestrutura
-        const infraSelecionados = Array.from(document.querySelectorAll('input[name="infra_itens"]:checked'))
-            .map(cb => cb.value);
+        if (dados.atividadesCount === 0) {{
+            analiseHTML += `<div class="dica"><i class="fas fa-lightbulb"></i> Adicione atividades para começar a análise.</div>`;
+        }} else if (dados.atividadesCount < 3) {{
+            analiseHTML += `<div class="dica"><i class="fas fa-lightbulb"></i> Considere diversificar com mais atividades para reduzir riscos.</div>`;
+        }}
         
-        // Material (ajustar por aluno se necessário)
-        const materialSelecionados = Array.from(document.querySelectorAll('input[name="material_itens"]:checked'))
-            .map(cb => cb.value);
+        analiseHTML += '</div></div>';
+        container.innerHTML = analiseHTML;
+    }}
+    
+    function atualizarGraficos(atividades) {{
+        if (atividades.length === 0) return;
         
-        // Marketing
-        const marketingSelecionados = Array.from(document.querySelectorAll('input[name="marketing_itens"]:checked'))
-            .map(cb => cb.value);
-        
-        // RH
-        const rhSelecionados = Array.from(document.querySelectorAll('input[name="rh_itens"]:checked'))
-            .map(cb => cb.value);
-        
-        // Outros custos
-        const outrosCustos = parseFloat(document.getElementById('outros_custos').value) || 0;
-        
-        // Atividades selecionadas
-        const atividadesSelect = document.getElementById('atividades_selecionadas');
-        const atividadesSelecionadas = Array.from(atividadesSelect.selectedOptions).map(opt => opt.value);
-        
-        // Atualizar resumo
-        let resumoHTML = `
-            <table class="table table-sm">
-                <tr>
-                    <td>Alunos atuais:</td>
-                    <td class="text-end"><strong>${{alunos}}</strong></td>
-                </tr>
-                <tr>
-                    <td>Novos alunos projetados:</td>
-                    <td class="text-end text-success"><strong>+${{novosAlunos}}</strong></td>
-                </tr>
-                <tr>
-                    <td>Total projetado:</td>
-                    <td class="text-end"><strong>${{totalAlunos}}</strong></td>
-                </tr>
-                <tr>
-                    <td>Aumento:</td>
-                    <td class="text-end"><strong>${{aumento}}%</strong></td>
-                </tr>
-                <tr class="table-secondary">
-                    <td>Nível escolar:</td>
-                    <td class="text-end"><span class="badge badge-${{nivel}}">${{nivel.replace('_', ' ').toUpperCase()}}</span></td>
-                </tr>
-                <tr class="table-secondary">
-                    <td>Atividades selecionadas:</td>
-                    <td class="text-end"><strong>${{atividadesSelecionadas.length}}</strong></td>
-                </tr>
-            </table>
-            
-            <div class="alert alert-info mt-3">
-                <i class="fas fa-calculator"></i> 
-                <strong>Receita adicional mensal estimada:</strong> 
-                <span class="float-end">R$ ${{(novosAlunos * mensalidade).toLocaleString('pt-BR')}}</span>
+        const container = document.getElementById('graficos_container');
+        container.innerHTML = `
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h6 class="mb-0"><i class="fas fa-chart-bar"></i> Visualização</h6>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="chartAtividades"></canvas>
+                    </div>
+                </div>
             </div>
         `;
         
-        document.getElementById('resumo_custos').innerHTML = resumoHTML;
+        // Gráfico simples
+        setTimeout(() => {{
+            const ctx = document.getElementById('chartAtividades').getContext('2d');
+            const cores = ['#FF6B8B', '#4ECDC4', '#45B7D1', '#FF9F1C'];
+            new Chart(ctx, {{
+                type: 'bar',
+                data: {{
+                    labels: atividades.slice(0, 8).map(a => a.nome.substring(0, 10) + '...'),
+                    datasets: [
+                        {{
+                            label: 'Receita',
+                            data: atividades.slice(0, 8).map(a => a.receitaMensal),
+                            backgroundColor: cores[0]
+                        }},
+                        {{
+                            label: 'Custo',
+                            data: atividades.slice(0, 8).map(a => a.custoMensal),
+                            backgroundColor: cores[2]
+                        }}
+                    ]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false
+                }}
+            }});
+        }}, 100);
     }}
     
-    function resetForm() {{
-        document.getElementById('simulacaoForm').reset();
-        document.querySelectorAll('.costo-item').forEach(item => {{
-            item.classList.remove('costo-seleccionado');
-        }});
-        atualizarResumo();
-    }}
-    
-    async function calcularSimulacao() {{
-        const btn = document.getElementById('btnCalcular');
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Calculando...';
+    async function calcularSimulacao(simulacaoId = null) {{
+        const btn = document.querySelector('button[onclick*="calcularSimulacao"]');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analisando com IA...';
         btn.disabled = true;
         
         try {{
-            // Validar campos obrigatórios
-            const alunosAtuais = document.getElementById('alunos_atuais').value;
-            const receitaAlunos = document.getElementById('receita_alunos_atividade').value;
-            const receitaNaoAlunos = document.getElementById('receita_nao_alunos_atividade').value;
-            const qtdAlunos = document.getElementById('quantidade_alunos_atividade').value;
-            const qtdNaoAlunos = document.getElementById('quantidade_nao_alunos_atividade').value;
-            const aumento = document.getElementById('aumento_esperado').value;
-            
-            // Identificar quais campos faltam
-            const camposFaltando = [];
-            if (!alunosAtuais) camposFaltando.push('Número atual de alunos');
-            if (!receitaAlunos) camposFaltando.push('Receita por aluno da escola');
-            if (!receitaNaoAlunos) camposFaltando.push('Receita por não-aluno');
-            if (!qtdAlunos) camposFaltando.push('Total de Alunos (Participantes das Atividades)');
-            if (!qtdNaoAlunos) camposFaltando.push('Total de Não-Alunos (Participantes Externos)');
-            if (!aumento) camposFaltando.push('Aumento esperado de matrículas (use o slider)');
-            
-            if (camposFaltando.length > 0) {{
-                alert('⚠️ Campos obrigatórios faltando:\\n\\n' + camposFaltando.join('\\n') + '\\n\\nPreencha todos antes de calcular!');
-                btn.innerHTML = '<i class="fas fa-calculator"></i> Calcular Viabilidade';
-                btn.disabled = false;
-                return;
-            }}
-            
-            // Coletar dados do formulário
-            const atividadesSelect = document.getElementById('atividades_selecionadas');
-            const atividadesSelecionadas = Array.from(atividadesSelect.selectedOptions).map(opt => opt.value);
-            
-            const infraSelecionados = Array.from(document.querySelectorAll('input[name="infra_itens"]:checked'))
-                .map(cb => cb.value);
-            
-            const materialSelecionados = Array.from(document.querySelectorAll('input[name="material_itens"]:checked'))
-                .map(cb => cb.value);
-            
-            const marketingSelecionados = Array.from(document.querySelectorAll('input[name="marketing_itens"]:checked'))
-                .map(cb => cb.value);
-            
-            const rhSelecionados = Array.from(document.querySelectorAll('input[name="rh_itens"]:checked'))
-                .map(cb => cb.value);
-            
-            const mensaisSelecionados = Array.from(document.querySelectorAll('input[name="custos_mensais_itens"]:checked'))
-                .map(cb => cb.value);
-            
+            // Coletar dados
             const dados = {{
-                alunos_atuais: parseInt(alunosAtuais),
-                receita_alunos_atividade: parseFloat(receitaAlunos),
-                receita_nao_alunos_atividade: parseFloat(receitaNaoAlunos),
-                quantidade_alunos_atividade: parseInt(qtdAlunos),
-                quantidade_nao_alunos_atividade: parseInt(qtdNaoAlunos),
-                aumento_esperado: parseInt(aumento),
-                nivel_escolar: document.getElementById('nivel_escolar').value,
-                atividades_selecionadas: atividadesSelecionadas,
-                infra_itens_selecionados: infraSelecionados,
-                material_itens_selecionados: materialSelecionados,
-                marketing_itens_selecionados: marketingSelecionados,
-                rh_itens_selecionados: rhSelecionados,
-                custos_mensais_itens_selecionados: mensaisSelecionados,
-                horas_semanais: parseInt(document.getElementById('horas_semanais').value) || 10,
-                outros_custos: parseFloat(document.getElementById('outros_custos').value) || 0
+                nome: document.getElementById('nome_simulacao').value,
+                meses_analise: parseInt(document.getElementById('meses_analise').value) || 24
             }};
             
-            const response = await fetch('/calcular', {{
-                method: 'POST',
-                headers: {{
-                    'Content-Type': 'application/json'
-                }},
+            // Atividades
+            dados.atividades = [];
+            Object.keys({json.dumps(SEGMENTOS)}).forEach(segmento => {{
+                const container = document.getElementById(`atividades_container_${{segmento}}`);
+                if (!container) return;
+                
+                const atividadesRows = container.querySelectorAll('.atividade-row');
+                atividadesRows.forEach(row => {{
+                    dados.atividades.push({{
+                        segmento: segmento,
+                        nome: row.querySelector('.nome-atividade-input').value,
+                        custo_hora_professor: parseFloat(row.querySelector('.custo-hora').value) || 0,
+                        horas_semanais: parseFloat(row.querySelector('.horas-semanais').value) || 0,
+                        semanas_mes: parseFloat(row.querySelector('.semanas-mes').value) || 4,
+                        custo_material_mensal: parseFloat(row.querySelector('.custo-material').value) || 0,
+                        alunos: parseInt(row.querySelector('.alunos').value) || 0,
+                        nao_alunos: parseInt(row.querySelector('.nao-alunos').value) || 0,
+                        receita_aluno: parseFloat(row.querySelector('.receita-aluno').value) || 0,
+                        receita_nao_aluno: parseFloat(row.querySelector('.receita-nao-aluno').value) || 0
+                    }});
+                }});
+            }});
+            
+            // Custos
+            dados.custos = {{}};
+            document.querySelectorAll('.campo-custo').forEach(campo => {{
+                const categoria = campo.getAttribute('data-categoria');
+                const item = campo.getAttribute('data-item');
+                const valor = parseFloat(campo.value) || 0;
+                const isMensal = campo.getAttribute('data-mensal') === 'true';
+                
+                if (!dados.custos[categoria]) {{
+                    dados.custos[categoria] = {{}};
+                }}
+                dados.custos[categoria][item] = {{ valor: valor, mensal: isMensal }};
+            }});
+            
+            // Enviar para API
+            const url = simulacaoId ? `/api/atualizar_simulacao_ia/${{simulacaoId}}` : '/api/calcular_com_ia';
+            const method = simulacaoId ? 'PUT' : 'POST';
+            
+            const response = await fetch(url, {{
+                method: method,
+                headers: {{ 'Content-Type': 'application/json' }},
                 body: JSON.stringify(dados)
             }});
             
+            if (!response.ok) throw new Error(await response.text());
+            
             const resultados = await response.json();
             
-            if (response.ok) {{
-                mostrarResultados(resultados);
-                // Redirecionar para resultado após cálculo
-                setTimeout(() => {{
-                    window.location.href = '/resultado';
-                }}, 1500);
-            }} else {{
-                alert('Erro: ' + (resultados.error || 'Desconhecido'));
-            }}
+            // Mostrar sucesso
+            document.getElementById('analise_rapida').innerHTML = `
+                <div class="alert alert-success">
+                    <h5><i class="fas fa-check-circle"></i> Análise completa!</h5>
+                    <p>Redirecionando para relatório detalhado com IA...</p>
+                </div>
+            `;
+            
+            setTimeout(() => {{
+                window.location.href = '/resultado_com_ia';
+            }}, 2000);
+            
         }} catch (error) {{
-            alert('Erro ao calcular: ' + error.message);
+            alert('Erro: ' + error.message);
         }} finally {{
-            btn.innerHTML = '<i class="fas fa-calculator"></i> Calcular Projeção Detalhada';
+            btn.innerHTML = originalText;
             btn.disabled = false;
         }}
     }}
     
-    function mostrarResultados(resultados) {{
-        const divResultado = document.getElementById('resultado');
-        
-        let html = `
-            <div class="card border-success">
-                <div class="card-header bg-success text-white">
-                    <h4 class="mb-0"><i class="fas fa-chart-line"></i> Simulação Calculada com Sucesso!</h4>
-                </div>
-                <div class="card-body">
-                    <div class="alert alert-success">
-                        <h5><i class="fas fa-check-circle"></i> Cálculos concluídos</h5>
-                        <p>Redirecionando para análise detalhada...</p>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6">
-                            <h5>Resumo Financeiro</h5>
-                            <table class="table table-bordered">
-                                <tr>
-                                    <th>Receita Mensal:</th>
-                                    <td class="text-success">R$ ${{resultados.receita_mensal.toLocaleString('pt-BR', {{minimumFractionDigits: 2}})}}</td>
-                                </tr>
-                                <tr>
-                                    <th>Custos Mensais:</th>
-                                    <td class="text-warning">R$ ${{resultados.custo_mensal_operacional.toLocaleString('pt-BR', {{minimumFractionDigits: 2}})}}</td>
-                                </tr>
-                                <tr>
-                                    <th><strong>Lucro Mensal:</strong></th>
-                                    <td class="text-success"><strong>R$ ${{resultados.lucro_mensal.toLocaleString('pt-BR', {{minimumFractionDigits: 2}})}}</strong></td>
-                                </tr>
-                                <tr>
-                                    <th>Investimento Total:</th>
-                                    <td class="text-danger">R$ ${{resultados.investimento_total.toLocaleString('pt-BR', {{minimumFractionDigits: 2}})}}</td>
-                                </tr>
-                                <tr>
-                                    <th>Payback:</th>
-                                    <td>${{(resultados.payback_meses === Infinity ? '∞' : resultados.payback_meses.toFixed(1))}} meses</td>
-                                </tr>
-                                <tr>
-                                    <th>ROI Anual:</th>
-                                    <td class="text-success"><strong>${{resultados.roi_percentual.toFixed(1)}}%</strong></td>
-                                </tr>
-                            </table>
-                        </div>
-                        <div class="col-md-6">
-                            <h5>Indicadores Operacionais</h5>
-                            <table class="table table-bordered">
-                                <tr>
-                                    <th>Novos alunos (Total):</th>
-                                    <td><strong>${{resultados.novos_alunos}}</strong></td>
-                                </tr>
-                                <tr>
-                                    <th>→ Alunos da escola:</th>
-                                    <td class="text-info">${{resultados.novos_alunos_atividade}}</td>
-                                </tr>
-                                <tr>
-                                    <th>→ Não-alunos:</th>
-                                    <td class="text-info">${{resultados.novos_nao_alunos_atividade}}</td>
-                                </tr>
-                                <tr>
-                                    <th>Professores necessários:</th>
-                                    <td>${{resultados.professores_necessarios}}</td>
-                                </tr>
-                                <tr>
-                                    <th>Custo médio por aluno:</th>
-                                    <td>R$ ${{resultados.custo_medio_por_aluno.toFixed(2)}}</td>
-                                </tr>
-                                <tr>
-                                    <th>Custo por atividade:</th>
-                                    <td>R$ ${{resultados.custo_medio_por_atividade.toFixed(2)}}</td>
-                                </tr>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-        
-        divResultado.innerHTML = html;
-        divResultado.style.display = 'block';
-        divResultado.scrollIntoView({{ behavior: 'smooth' }});
+    function carregarExemploIA() {{
+        if (confirm('Carregar exemplo otimizado com recomendações de IA?')) {{
+            // Limpar
+            Object.keys({json.dumps(SEGMENTOS)}).forEach(seg => {{
+                const container = document.getElementById(`atividades_container_${{seg}}`);
+                if (container) container.innerHTML = '';
+            }});
+            
+            // Exemplo otimizado pela IA
+            const exemplos = [
+                {{ segmento: 'ei', nome: 'Musicalização Infantil', custo_hora: 48, horas: 8, alunos: 18, nao_alunos: 6, receita_aluno: 135, receita_nao_aluno: 180, material: 220 }},
+                {{ segmento: 'ef_i', nome: 'Robótica Educacional', custo_hora: 65, horas: 10, alunos: 16, nao_alunos: 8, receita_aluno: 195, receita_nao_aluno: 260, material: 450 }},
+                {{ segmento: 'ef_ii', nome: 'Olimpíadas de Matemática', custo_hora: 58, horas: 6, alunos: 20, nao_alunos: 10, receita_aluno: 160, receita_nao_aluno: 210, material: 180 }},
+                {{ segmento: 'em', nome: 'Preparatório Universitário', custo_hora: 75, horas: 15, alunos: 22, nao_alunos: 12, receita_aluno: 240, receita_nao_aluno: 320, material: 350 }}
+            ];
+            
+            exemplos.forEach(ex => {{
+                const container = document.getElementById(`atividades_container_${{ex.segmento}}`);
+                const template = document.getElementById('template-atividade').content.cloneNode(true);
+                
+                template.querySelector('.nome-atividade-input').value = ex.nome;
+                template.querySelector('.nome-atividade').textContent = ex.nome;
+                template.querySelector('.custo-hora').value = ex.custo_hora;
+                template.querySelector('.horas-semanais').value = ex.horas;
+                template.querySelector('.alunos').value = ex.alunos;
+                template.querySelector('.nao-alunos').value = ex.nao_alunos;
+                template.querySelector('.receita-aluno').value = ex.receita_aluno;
+                template.querySelector('.receita-nao-aluno').value = ex.receita_nao_aluno;
+                template.querySelector('.custo-material').value = ex.material;
+                
+                container.appendChild(template);
+            }});
+            
+            // Custos otimizados
+            const custosOtimizados = {{
+                'investimento_inicial_reforma': 45000,
+                'investimento_inicial_equipamentos': 28000,
+                'custos_mensais_fixos_aluguel': 7500,
+                'custos_mensais_fixos_energia': 1200,
+                'recursos_humanos_salários_professores': 12000,
+                'marketing_site': 800
+            }};
+            
+            Object.entries(custosOtimizados).forEach(([id, valor]) => {{
+                const campo = document.getElementById(id);
+                if (campo) campo.value = valor;
+            }});
+            
+            document.getElementById('nome_simulacao').value = 'Plano Otimizado por IA';
+            atualizarResumoIA();
+        }}
+    }}
+    
+    function resetForm() {{
+        if (confirm('Limpar todos os dados?')) {{
+            Object.keys({json.dumps(SEGMENTOS)}).forEach(seg => {{
+                const container = document.getElementById(`atividades_container_${{seg}}`);
+                if (container) container.innerHTML = '';
+                adicionarAtividade(seg, true);
+            }});
+            
+            document.querySelectorAll('.campo-custo').forEach(campo => campo.value = 0);
+            document.getElementById('nome_simulacao').value = 'Meu Plano Escolar';
+            document.getElementById('meses_analise').value = '24';
+            
+            atualizarResumoIA();
+        }}
     }}
     </script>
-    
-    <style>
-    .badge-infantil {{ background-color: #FF6B8B; }}
-    .badge-fundamental {{ background-color: #4ECDC4; }}
-    .badge-medio {{ background-color: #45B7D1; }}
-    </style>
     '''
-    return get_base_html("Simulação Detalhada - Business Plan", content)
+    
+    return get_base_html("Simulação com IA", content)
 
-@app.route('/calcular', methods=['POST'])
-def calcular():
+def analisar_com_ia(dados_simulacao: Dict) -> Dict:
+    """
+    Analisa a simulação usando IA (OpenAI)
+    Retorna recomendações, alertas e plano de ação
+    """
     try:
-        dados = request.json
+        # Preparar prompt para a IA
+        atividades_texto = ""
+        for i, atividade in enumerate(dados_simulacao.get('atividades', [])[:10], 1):
+            atividades_texto += f"{i}. {atividade['nome']} ({atividade['segmento']}): "
+            atividades_texto += f"{atividade['alunos']} alunos + {atividade['nao_alunos']} não-alunos, "
+            atividades_texto += f"Receita: R${atividade.get('receita_mensal', 0):,.0f}/mês, "
+            atividades_texto += f"Custo: R${atividade.get('custo_total_mensal', 0):,.0f}/mês\n"
         
-        # Validação básica
-        if not dados.get('alunos_atuais') or dados['alunos_atuais'] <= 0:
-            return jsonify({'error': 'Número de alunos atual inválido'}), 300
-            
-        if dados.get('aumento_esperado') < 10 or dados.get('aumento_esperado') > 50:
-            return jsonify({'warning': 'Aumento esperado deve estar entre 10% e 50%'})
+        resumo = dados_simulacao.get('resultados', {})
         
-        # Calcular custos detalhados
-        custos_detalhados = calcular_custos_detalhados(dados)
+        prompt = f"""
+        Analise este plano de negócios para uma escola/centro educacional:
         
-        # Calcular projeções
-        resultados = calcular_projecao(dados, custos_detalhados)
+        RESUMO:
+        - Total de atividades: {len(dados_simulacao.get('atividades', []))}
+        - Investimento inicial: R${resumo.get('investimento_inicial', 0):,.0f}
+        - Receita mensal: R${resumo.get('receita_mensal_atividades', 0):,.0f}
+        - Custo mensal total: R${resumo.get('custo_mensal_total', 0):,.0f}
+        - Lucro mensal: R${resumo.get('lucro_mensal', 0):,.0f}
+        - Margem de lucro: {resumo.get('margem_lucro', 0):.1f}%
+        - ROI ({resumo.get('meses_analise', 24)} meses): {resumo.get('roi_percentual', 0):.1f}%
+        - Payback: {resumo.get('payback_meses', 0):.1f} meses
         
-        # Converter Infinity para um número grande (para compatibilidade com JSON)
-        if math.isinf(resultados['payback_meses']):
-            resultados['payback_meses'] = 999999
+        ATIVIDADES:
+        {atividades_texto}
         
-        # Salvar na sessão
-        session['ultima_simulacao'] = {
-            'dados_entrada': dados,
-            'resultados': resultados,
-            'custos_detalhados': custos_detalhados
+        Por favor, forneça uma análise em português brasileiro com:
+        1. PONTOS FORTES (até 3 itens)
+        2. PONTOS DE ATENÇÃO/RISCOS (até 3 itens)
+        3. RECOMENDAÇÕES ESPECÍFICAS (3-5 recomendações práticas)
+        4. PLANO DE AÇÃO (passos concretos para implementação)
+        5. BENCHMARK COMPARATIVO (como está vs mercado)
+        
+        Seja específico, prático e foque em ações que possam ser implementadas.
+        Use markdown para formatação.
+        """
+        
+        # Chamar OpenAI API (versão simplificada se não tiver chave)
+        if openai.api_key and openai.api_key != '':
+            try:
+                response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "Você é um consultor especializado em planejamento financeiro para instituições educacionais."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1500
+                )
+                analise_texto = response.choices[0].message.content
+            except:
+                analise_texto = gerar_analise_fallback(dados_simulacao)
+        else:
+            # Fallback: análise baseada em regras
+            analise_texto = gerar_analise_fallback(dados_simulacao)
+        
+        # Processar a análise
+        return {
+            'analise_completa': analise_texto,
+            'recomendacoes': extrair_recomendacoes(analise_texto),
+            'alertas': identificar_alertas(resumo),
+            'pontos_fortes': identificar_pontos_fortes(resumo),
+            'plano_acao': extrair_plano_acao(analise_texto)
         }
         
-        # Salvar no banco de dados
-        salvar_simulacao(dados, resultados, custos_detalhados)
-        
-        return jsonify(resultados)
-        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f"Erro na análise com IA: {e}")
+        return {
+            'analise_completa': "Análise temporariamente indisponível. Use os benchmarks abaixo para orientação.",
+            'recomendacoes': [],
+            'alertas': identificar_alertas(dados_simulacao.get('resultados', {})),
+            'pontos_fortes': identificar_pontos_fortes(dados_simulacao.get('resultados', {})),
+            'plano_acao': []
+        }
 
-@app.route('/api/recalcular', methods=['POST'])
-def recalcular():
-    """Recalcula a projeção com dados editáveis"""
+def gerar_analise_fallback(dados_simulacao: Dict) -> str:
+    """Gera análise quando a IA não está disponível"""
+    resumo = dados_simulacao.get('resultados', {})
+    
+    analise = "# Análise do Plano de Negócios\n\n"
+    
+    # Pontos fortes
+    analise += "## ✅ PONTOS FORTES\n\n"
+    if resumo.get('margem_lucro', 0) >= 25:
+        analise += f"- Margem de lucro saudável ({resumo.get('margem_lucro', 0):.1f}%)\n"
+    if resumo.get('roi_percentual', 0) >= 100:
+        analise += f"- ROI excelente ({resumo.get('roi_percentual', 0):.1f}% em {resumo.get('meses_analise', 24)} meses)\n"
+    if resumo.get('payback_meses', 0) <= 24 and resumo.get('payback_meses', 0) > 0:
+        analise += f"- Payback rápido ({resumo.get('payback_meses', 0):.1f} meses)\n"
+    if len(dados_simulacao.get('atividades', [])) >= 4:
+        analise += f"- Boa diversificação ({len(dados_simulacao.get('atividades', []))} atividades)\n"
+    
+    # Pontos de atenção
+    analise += "\n## ⚠️ PONTOS DE ATENÇÃO\n\n"
+    if resumo.get('margem_lucro', 0) < 15:
+        analise += f"- Margem de lucro baixa ({resumo.get('margem_lucro', 0):.1f}%). Considere revisar preços ou custos.\n"
+    if resumo.get('payback_meses', 0) > 36:
+        analise += f"- Payback muito longo ({resumo.get('payback_meses', 0):.1f} meses). Risco alto.\n"
+    if resumo.get('investimento_inicial', 0) > 100000:
+        analise += f"- Investimento inicial elevado (R${resumo.get('investimento_inicial', 0):,.0f})\n"
+    
+    # Recomendações
+    analise += "\n## 🎯 RECOMENDAÇÕES\n\n"
+    analise += "1. **Otimize a estrutura de custos**: Revise custos variáveis e negocie com fornecedores\n"
+    analise += "2. **Aumente o valor percebido**: Diferencie suas atividades para justificar preços mais altos\n"
+    analise += "3. **Diversifique as fontes de receita**: Considere pacotes semestrais/anuais com desconto\n"
+    analise += "4. **Controle o investimento inicial**: Foque em equipamentos essenciais primeiro\n"
+    analise += "5. **Monitore a relação aluno/professor**: Otimize para maximizar a rentabilidade\n"
+    
+    # Plano de ação
+    analise += "\n## 📋 PLANO DE AÇÃO\n\n"
+    analise += "**Mês 1-3:**\n"
+    analise += "- Implementar 2-3 atividades principais\n"
+    analise += "- Campanha de lançamento com preços promocionais\n"
+    analise += "- Contratação de equipe mínima\n\n"
+    
+    analise += "**Mês 4-6:**\n"
+    analise += "- Avaliar desempenho das atividades\n"
+    analise += "- Ajustar preços conforme aceitação do mercado\n"
+    analise += "- Expandir para atividades adicionais\n\n"
+    
+    analise += "**Mês 7-12:**\n"
+    analise += "- Buscar eficiências operacionais\n"
+    analise += "- Implementar pacotes de fidelização\n"
+    analise += "- Expandir para novos segmentos\n"
+    
+    return analise
+
+def extrair_recomendacoes(analise_texto: str) -> List[str]:
+    """Extrai recomendações da análise"""
+    recomendacoes = []
+    linhas = analise_texto.split('\n')
+    
+    for linha in linhas:
+        linha = linha.strip()
+        if linha.startswith('- ') or linha.startswith('* ') or linha.startswith('1. ') or linha.startswith('2. '):
+            if any(keyword in linha.lower() for keyword in ['recomendo', 'sugiro', 'aconselho', 'considere', 'sugestão']):
+                recomendacoes.append(linha)
+    
+    return recomendacoes[:5] if recomendacoes else [
+        "Revise a estrutura de custos para melhorar a margem",
+        "Considere aumentar o preço das atividades mais populares",
+        "Diversifique as fontes de receita com pacotes promocionais"
+    ]
+
+def identificar_alertas(resumo: Dict) -> List[Dict]:
+    """Identifica alertas baseados em benchmarks"""
+    alertas = []
+    
+    if resumo.get('margem_lucro', 0) < 15:
+        alertas.append({
+            'tipo': 'alto',
+            'mensagem': f'Margem de lucro muito baixa ({resumo.get("margem_lucro", 0):.1f}%)',
+            'acao': 'Aumente receitas ou reduza custos'
+        })
+    
+    if resumo.get('payback_meses', 0) > 36:
+        alertas.append({
+            'tipo': 'alto',
+            'mensagem': f'Payback muito longo ({resumo.get("payback_meses", 0):.1f} meses)',
+            'acao': 'Reduza investimento inicial ou aumente lucro'
+        })
+    
+    if resumo.get('roi_percentual', 0) < 50:
+        alertas.append({
+            'tipo': 'medio',
+            'mensagem': f'ROI abaixo do ideal ({resumo.get("roi_percentual", 0):.1f}%)',
+            'acao': 'Otimize a relação custo-benefício'
+        })
+    
+    return alertas
+
+def identificar_pontos_fortes(resumo: Dict) -> List[Dict]:
+    """Identifica pontos fortes"""
+    pontos = []
+    
+    if resumo.get('margem_lucro', 0) >= 25:
+        pontos.append({
+            'aspecto': 'Rentabilidade',
+            'detalhe': f'Margem de lucro excelente: {resumo.get("margem_lucro", 0):.1f}%'
+        })
+    
+    if resumo.get('roi_percentual', 0) >= 100:
+        pontos.append({
+            'aspecto': 'Retorno sobre Investimento',
+            'detalhe': f'ROI muito bom: {resumo.get("roi_percentual", 0):.1f}%'
+        })
+    
+    if resumo.get('payback_meses', 0) <= 24 and resumo.get('payback_meses', 0) > 0:
+        pontos.append({
+            'aspecto': 'Recuperação do Investimento',
+            'detalhe': f'Payback rápido: {resumo.get("payback_meses", 0):.1f} meses'
+        })
+    
+    return pontos
+
+def extrair_plano_acao(analise_texto: str) -> List[str]:
+    """Extrai plano de ação"""
+    plano = []
+    dentro_plano = False
+    
+    for linha in analise_texto.split('\n'):
+        linha = linha.strip()
+        if 'PLANO DE AÇÃO' in linha or 'plano de ação' in linha.lower():
+            dentro_plano = True
+            continue
+        if dentro_plano and linha and (linha.startswith('- ') or linha.startswith('* ') or linha.startswith('1. ')):
+            plano.append(linha)
+        if dentro_plano and linha.startswith('##'):
+            break
+    
+    return plano[:6] if plano else [
+        "Mês 1-3: Implementação inicial e captação de alunos",
+        "Mês 4-6: Ajustes baseados em feedback e otimização",
+        "Mês 7-12: Expansão e consolidação"
+    ]
+
+@app.route('/api/calcular_com_ia', methods=['POST'])
+def api_calcular_com_ia():
+    """API para cálculo com análise de IA"""
     try:
-        dados_editados = request.json
+        dados = request.get_json()
+        if not dados:
+            return jsonify({'error': 'Sem dados'}), 400
         
-        # Usar dados da sessão como base
-        if 'ultima_simulacao' not in session:
-            return jsonify({'error': 'Nenhuma simulação em cache'}), 400
+        print("Processando simulação com IA...")
         
-        dados_originais = session['ultima_simulacao']['dados_entrada'].copy()
-        custos_originais = session['ultima_simulacao']['custos_detalhados'].copy()
+        # Calcular resultados
+        resultados = calcular_resultados(dados)
         
-        # Atualizar apenas os campos que vieram na requisição
-        dados_atualizados = {**dados_originais, **{k: v for k, v in dados_editados.items() if not k.endswith('_editado')}}
+        # Gerar análise com IA
+        dados_simulacao = {
+            'entrada': dados,
+            'resultados': resultados,
+            'atividades': processar_atividades(dados.get('atividades', [])),
+            'custos': dados.get('custos', {})
+        }
         
-        # Recalcular com ajuste de custos se editados
-        custos_detalhados = calcular_custos_detalhados(dados_atualizados)
+        analise_ia = analisar_com_ia(dados_simulacao)
         
-        # Se investimento foi editado, usar o valor do usuário
-        if 'investimento_total_editado' in dados_editados:
-            custos_detalhados['resumo']['investimento_total'] = dados_editados['investimento_total_editado']
+        # Salvar na sessão
+        session['simulacao_com_ia'] = {
+            'dados_entrada': dados,
+            'resultados': resultados,
+            'analise_ia': analise_ia,
+            'atividades_detalhadas': processar_atividades(dados.get('atividades', [])),
+            'nome_simulacao': dados.get('nome', 'Análise com IA')
+        }
         
-        # Se custos mensais foram editados, usar o valor do usuário
-        if 'custos_mensais_editado' in dados_editados:
-            custos_detalhados['resumo']['custo_mensal_operacional'] = dados_editados['custos_mensais_editado']
-        
-        resultados = calcular_projecao(dados_atualizados, custos_detalhados)
-        
-        # Converter Infinity para um número grande (para compatibilidade com JSON)
-        if math.isinf(resultados['payback_meses']):
-            resultados['payback_meses'] = 999999
+        # Salvar no banco
+        salvar_no_banco(dados, resultados, analise_ia)
         
         return jsonify({
-            'sucesso': True,
-            'resultados': resultados,
-            'custos_detalhados': {
-                'resumo': custos_detalhados['resumo'],
-                'categorias': {k: {'total': v['total']} for k, v in custos_detalhados['categorias'].items()}
-            }
+            **resultados,
+            'analise_disponivel': True,
+            'alertas': analise_ia.get('alertas', []),
+            'recomendacoes_count': len(analise_ia.get('recomendacoes', []))
         })
         
     except Exception as e:
+        print(f"Erro na API com IA: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/salvar-parametros', methods=['POST'])
-def salvar_parametros():
-    """Salva os parâmetros editados da escola na sessão"""
+@app.route('/api/atualizar_simulacao_ia/<int:simulacao_id>', methods=['PUT'])
+def api_atualizar_simulacao_ia(simulacao_id):
+    """API para atualizar com IA"""
     try:
-        dados = request.json
+        dados = request.get_json()
+        if not dados:
+            return jsonify({'error': 'Sem dados'}), 400
         
-        if 'ultima_simulacao' not in session:
-            return jsonify({'sucesso': False, 'error': 'Nenhuma simulação em cache'}), 400
+        # Calcular resultados
+        resultados = calcular_resultados(dados)
         
-        # Salvar os parâmetros na sessão para uso posterior
-        session['parametros_editados'] = {
-            'custo_professor_por_hora': dados.get('custo_professor_por_hora'),
-            'material_mensal_por_aluno': dados.get('material_mensal_por_aluno'),
-            'ratio_professor_aluno': dados.get('ratio_professor_aluno')
+        # Gerar análise com IA
+        dados_simulacao = {
+            'entrada': dados,
+            'resultados': resultados,
+            'atividades': processar_atividades(dados.get('atividades', [])),
+            'custos': dados.get('custos', {})
         }
-        session.modified = True
         
-        return jsonify({'sucesso': True, 'mensagem': 'Parâmetros salvos com sucesso'})
+        analise_ia = analisar_com_ia(dados_simulacao)
+        
+        # Salvar na sessão
+        session['simulacao_com_ia'] = {
+            'dados_entrada': dados,
+            'resultados': resultados,
+            'analise_ia': analise_ia,
+            'atividades_detalhadas': processar_atividades(dados.get('atividades', [])),
+            'nome_simulacao': dados.get('nome', 'Análise com IA')
+        }
+        
+        # Atualizar no banco
+        try:
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+            UPDATE simulacoes SET
+                nome = ?,
+                data_atualizacao = ?,
+                total_alunos = ?,
+                total_participantes = ?,
+                investimento_total = ?,
+                custo_mensal_total = ?,
+                receita_mensal_total = ?,
+                lucro_mensal_total = ?,
+                payback_meses = ?,
+                roi_percentual = ?,
+                margem_lucro = ?,
+                dados_completos = ?,
+                analise_ia = ?
+            WHERE id = ?
+            ''', (
+                dados.get('nome', 'Simulação IA'),
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                resultados['total_alunos'],
+                resultados['total_participantes'],
+                resultados['investimento_inicial'],
+                resultados['custo_mensal_total'],
+                resultados['receita_mensal_atividades'],
+                resultados['lucro_mensal'],
+                resultados.get('payback_meses', 0),
+                resultados.get('roi_percentual', 0),
+                resultados.get('margem_lucro', 0),
+                json.dumps({
+                    'entrada': dados,
+                    'resultados': resultados,
+                    'atividades': processar_atividades(dados.get('atividades', []))
+                }),
+                json.dumps(analise_ia),
+                simulacao_id
+            ))
+            
+            # Remover atividades antigas
+            cursor.execute('DELETE FROM atividades_simulacao WHERE simulacao_id = ?', (simulacao_id,))
+            
+            # Salvar novas atividades
+            for atividade in processar_atividades(dados.get('atividades', [])):
+                cursor.execute('''
+                INSERT INTO atividades_simulacao (
+                    simulacao_id, segmento, nome_atividade, custo_hora_professor,
+                    horas_semanais, semanas_mes, alunos, nao_alunos,
+                    receita_aluno, receita_nao_aluno, custo_material_mensal
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    simulacao_id,
+                    atividade['segmento'],
+                    atividade['nome'],
+                    atividade['custo_hora_professor'],
+                    atividade['horas_semanais'],
+                    atividade['semanas_mes'],
+                    atividade['alunos'],
+                    atividade['nao_alunos'],
+                    atividade['receita_aluno'],
+                    atividade['receita_nao_aluno'],
+                    atividade['custo_material_mensal']
+                ))
+            
+            conn.commit()
+            conn.close()
+            print(f"✅ Simulação #{simulacao_id} atualizada com análise de IA!")
+            
+        except Exception as e:
+            print(f"⚠️ Erro ao atualizar no banco: {e}")
+        
+        return jsonify({
+            **resultados,
+            'analise_disponivel': True,
+            'alertas': analise_ia.get('alertas', []),
+            'recomendacoes_count': len(analise_ia.get('recomendacoes', []))
+        })
         
     except Exception as e:
-        return jsonify({'sucesso': False, 'error': str(e)}), 500
+        print(f"Erro na API atualizar com IA: {e}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/api/salvar-atividades', methods=['POST'])
-def salvar_atividades():
-    """Salva os custos editados das atividades na sessão"""
+@app.route('/api/excluir_simulacao/<int:simulacao_id>', methods=['DELETE'])
+def api_excluir_simulacao(simulacao_id):
+    """API para excluir simulação"""
     try:
-        dados = request.json
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
         
-        if 'ultima_simulacao' not in session:
-            return jsonify({'sucesso': False, 'error': 'Nenhuma simulação em cache'}), 400
+        # Primeiro excluir atividades relacionadas
+        cursor.execute('DELETE FROM atividades_simulacao WHERE simulacao_id = ?', (simulacao_id,))
         
-        # Salvar os custos das atividades na sessão
-        session['custos_atividades_editados'] = dados
-        session.modified = True
+        # Depois excluir a simulação
+        cursor.execute('DELETE FROM simulacoes WHERE id = ?', (simulacao_id,))
         
-        return jsonify({'sucesso': True, 'mensagem': 'Custos das atividades salvos com sucesso'})
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True, 'message': 'Simulação excluída com sucesso!'})
         
     except Exception as e:
-        return jsonify({'sucesso': False, 'error': str(e)}), 500
+        print(f"Erro ao excluir simulação: {e}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/resultado')
-def resultado():
-    if 'ultima_simulacao' not in session:
-        return index()
+def calcular_resultados(dados: Dict) -> Dict:
+    """Calcula resultados financeiros"""
+    # Processar atividades
+    atividades = processar_atividades(dados.get('atividades', []))
     
-    dados = session['ultima_simulacao']
-    custos_detalhados = dados['custos_detalhados']
-    
-    # Gerar HTML para tabelas de custos detalhados
-    tabelas_custos = ""
-    
-    # Cores para cada categoria
-    cores_categoria = {
-        'custos_mensais': {'bg': 'secondary', 'icon': 'clock'},
-        'infraestrutura': {'bg': 'info', 'icon': 'building'},
-        'material': {'bg': 'success', 'icon': 'book'},
-        'marketing': {'bg': 'warning', 'icon': 'bullhorn'},
-        'recursos_humanos': {'bg': 'danger', 'icon': 'users'},
-        'professores': {'bg': 'primary', 'icon': 'chalkboard-teacher'},
-        'outros': {'bg': 'dark', 'icon': 'box'}
+    # Totais
+    totais = {
+        'total_alunos': sum(a['alunos'] for a in atividades),
+        'total_nao_alunos': sum(a['nao_alunos'] for a in atividades),
+        'receita_mensal_atividades': sum(a['receita_mensal'] for a in atividades),
+        'custo_mensal_atividades': sum(a['custo_total_mensal'] for a in atividades),
+        'investimento_inicial': 0,
+        'custo_mensal_geral': 0
     }
     
-    for categoria, info in custos_detalhados['categorias'].items():
-        linhas = ""
-        for detalhe in info['detalhes']:
-            valor_formatado = f"R$ {detalhe['valor']:,.2f}"
-            descricao = f"<br><small class='text-muted'>{detalhe.get('descricao', '')}</small>" if detalhe.get('descricao') else ""
-            por_aluno = " <span class='badge bg-info'>por aluno</span>" if detalhe.get('por_aluno', False) else ""
-            
-            linhas += f'''
+    # Custos
+    for categoria, itens in dados.get('custos', {}).items():
+        for item, info in itens.items():
+            valor = info.get('valor', 0)
+            if info.get('mensal'):
+                totais['custo_mensal_geral'] += valor
+            else:
+                totais['investimento_inicial'] += valor
+    
+    # Totais finais
+    totais['total_participantes'] = totais['total_alunos'] + totais['total_nao_alunos']
+    totais['custo_mensal_total'] = totais['custo_mensal_atividades'] + totais['custo_mensal_geral']
+    totais['lucro_mensal'] = totais['receita_mensal_atividades'] - totais['custo_mensal_total']
+    
+    # Margem e ROI
+    totais['margem_lucro'] = (totais['lucro_mensal'] / totais['receita_mensal_atividades'] * 100) if totais['receita_mensal_atividades'] > 0 else 0
+    
+    meses_analise = dados.get('meses_analise', 24)
+    if totais['lucro_mensal'] > 0 and totais['investimento_inicial'] > 0:
+        totais['payback_meses'] = totais['investimento_inicial'] / totais['lucro_mensal']
+        totais['roi_percentual'] = ((totais['lucro_mensal'] * meses_analise) / totais['investimento_inicial']) * 100
+    else:
+        totais['payback_meses'] = 0
+        totais['roi_percentual'] = 0
+    
+    totais['meses_analise'] = meses_analise
+    totais['total_atividades'] = len(atividades)
+    
+    return totais
+
+def processar_atividades(atividades_raw: List) -> List:
+    """Processa atividades com cálculos detalhados"""
+    atividades = []
+    for a in atividades_raw:
+        custo_professor = a['custo_hora_professor'] * a['horas_semanais'] * a['semanas_mes']
+        custo_total = custo_professor + a['custo_material_mensal']
+        receita = (a['alunos'] * a['receita_aluno']) + (a['nao_alunos'] * a['receita_nao_aluno'])
+        
+        atividades.append({
+            **a,
+            'custo_professor_mensal': custo_professor,
+            'custo_total_mensal': custo_total,
+            'receita_mensal': receita,
+            'lucro_mensal': receita - custo_total,
+            'margem_atividade': (receita - custo_total) / receita * 100 if receita > 0 else 0
+        })
+    return atividades
+
+def salvar_no_banco(dados: Dict, resultados: Dict, analise_ia: Dict):
+    """Salva simulação no banco"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO simulacoes (
+            nome, data_criacao, data_atualizacao, total_alunos, total_participantes,
+            investimento_total, custo_mensal_total, receita_mensal_total,
+            lucro_mensal_total, payback_meses, roi_percentual, margem_lucro,
+            dados_completos, analise_ia
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            dados.get('nome', 'Simulação IA'),
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            resultados['total_alunos'],
+            resultados['total_participantes'],
+            resultados['investimento_inicial'],
+            resultados['custo_mensal_total'],
+            resultados['receita_mensal_atividades'],
+            resultados['lucro_mensal'],
+            resultados.get('payback_meses', 0),
+            resultados.get('roi_percentual', 0),
+            resultados.get('margem_lucro', 0),
+            json.dumps({
+                'entrada': dados,
+                'resultados': resultados,
+                'atividades': processar_atividades(dados.get('atividades', []))
+            }),
+            json.dumps(analise_ia)
+        ))
+        
+        simulacao_id = cursor.lastrowid
+        
+        # Salvar atividades
+        for atividade in processar_atividades(dados.get('atividades', [])):
+            cursor.execute('''
+            INSERT INTO atividades_simulacao (
+                simulacao_id, segmento, nome_atividade, custo_hora_professor,
+                horas_semanais, semanas_mes, alunos, nao_alunos,
+                receita_aluno, receita_nao_aluno, custo_material_mensal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                simulacao_id,
+                atividade['segmento'],
+                atividade['nome'],
+                atividade['custo_hora_professor'],
+                atividade['horas_semanais'],
+                atividade['semanas_mes'],
+                atividade['alunos'],
+                atividade['nao_alunos'],
+                atividade['receita_aluno'],
+                atividade['receita_nao_aluno'],
+                atividade['custo_material_mensal']
+            ))
+        
+        conn.commit()
+        conn.close()
+        print(f"✅ Simulação #{simulacao_id} salva com análise de IA!")
+        
+    except Exception as e:
+        print(f"⚠️ Erro ao salvar no banco: {e}")
+
+@app.route('/resultado_com_ia')
+def resultado_com_ia():
+    """Página de resultados com análise de IA"""
+    if 'simulacao_com_ia' not in session:
+        return redirect('/simulacao')
+    
+    dados = session['simulacao_com_ia']
+    resultados = dados['resultados']
+    analise_ia = dados['analise_ia']
+    atividades = dados['atividades_detalhadas']
+    nome_simulacao = dados['nome_simulacao']
+    
+    # HTML para análise de IA
+    analise_html = f'''
+    <div class="analise-ia">
+        <h4><i class="fas fa-robot"></i> Análise de Inteligência Artificial</h4>
+        <div class="mt-3">
+            {formatar_analise_ia(analise_ia['analise_completa'])}
+        </div>
+    </div>
+    '''
+    
+    # HTML para alertas
+    alertas_html = ""
+    if analise_ia.get('alertas'):
+        for alerta in analise_ia['alertas']:
+            alertas_html += f'''
+            <div class="alert alert-{"danger" if alerta["tipo"] == "alto" else "warning"}">
+                <i class="fas fa-exclamation-triangle"></i> <strong>{alerta["mensagem"]}</strong>
+                <br><small>{alerta["acao"]}</small>
+            </div>
+            '''
+    
+    # HTML para pontos fortes
+    pontos_html = ""
+    if analise_ia.get('pontos_fortes'):
+        for ponto in analise_ia['pontos_fortes']:
+            pontos_html += f'''
+            <div class="alert alert-success">
+                <i class="fas fa-check-circle"></i> <strong>{ponto["aspecto"]}:</strong> {ponto["detalhe"]}
+            </div>
+            '''
+    
+    # HTML para recomendações
+    recomendacoes_html = ""
+    if analise_ia.get('recomendacoes'):
+        recomendacoes_html = '<h5><i class="fas fa-lightbulb"></i> Recomendações da IA</h5><ul>'
+        for rec in analise_ia['recomendacoes'][:5]:
+            recomendacoes_html += f'<li>{rec}</li>'
+        recomendacoes_html += '</ul>'
+    
+    # HTML para plano de ação
+    plano_acao_html = ""
+    if analise_ia.get('plano_acao'):
+        plano_acao_html = '<h5><i class="fas fa-clipboard-list"></i> Plano de Ação</h5><ul>'
+        for passo in analise_ia['plano_acao'][:6]:
+            plano_acao_html += f'<li>{passo}</li>'
+        plano_acao_html += '</ul>'
+    
+    # Tabela de resultados
+    resultados_html = f'''
+    <table class="table table-bordered">
+        <thead class="table-dark">
             <tr>
-                <td>{detalhe['item']}{por_aluno}{descricao}</td>
-                <td class="text-end fw-bold">{valor_formatado}</td>
+                <th colspan="2" class="text-center">RESUMO FINANCEIRO</th>
             </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Investimento Inicial</strong></td>
+                <td class="text-end">R$ {resultados.get('investimento_inicial', 0):,.2f}</td>
+            </tr>
+            <tr>
+                <td><strong>Receita Mensal</strong></td>
+                <td class="text-end text-success">R$ {resultados.get('receita_mensal_atividades', 0):,.2f}</td>
+            </tr>
+            <tr>
+                <td><strong>Custo Mensal Total</strong></td>
+                <td class="text-end text-danger">R$ {resultados.get('custo_mensal_total', 0):,.2f}</td>
+            </tr>
+            <tr class="table-info">
+                <td><strong>Lucro Mensal</strong></td>
+                <td class="text-end"><strong>R$ {resultados.get('lucro_mensal', 0):,.2f}</strong></td>
+            </tr>
+            <tr>
+                <td><strong>Margem de Lucro</strong></td>
+                <td class="text-end">
+                    <span class="badge badge-fixed { 'bg-success' if resultados.get('margem_lucro', 0) >= 25 else 'bg-warning' if resultados.get('margem_lucro', 0) >= 15 else 'bg-danger' }">
+                        {resultados.get('margem_lucro', 0):.1f}%
+                    </span>
+                </td>
+            </tr>
+            <tr>
+                <td><strong>ROI ({resultados.get('meses_analise', 24)} meses)</strong></td>
+                <td class="text-end">
+                    <span class="badge badge-fixed { 'bg-success' if resultados.get('roi_percentual', 0) >= 100 else 'bg-warning' if resultados.get('roi_percentual', 0) >= 50 else 'bg-danger' }">
+                        {resultados.get('roi_percentual', 0):.1f}%
+                    </span>
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Payback (meses)</strong></td>
+                <td class="text-end">
+                    <span class="badge badge-fixed { 'bg-success' if resultados.get('payback_meses', 0) <= 24 else 'bg-warning' if resultados.get('payback_meses', 0) <= 36 else 'bg-danger' }">
+                        {resultados.get('payback_meses', 0):.1f} meses
+                    </span>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+    '''
+    
+    # Tabela de atividades
+    atividades_html = ""
+    if atividades:
+        atividades_html = '''
+        <div class="card mt-4">
+            <div class="card-header bg-light">
+                <h5 class="mb-0"><i class="fas fa-tasks"></i> Detalhamento das Atividades</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover table-sm mb-0 table-fixed">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="col-atividade-nome">Atividade</th>
+                                <th class="col-atividade-segmento">Segmento</th>
+                                <th class="col-atividade-alunos text-center">Alunos</th>
+                                <th class="col-atividade-nao-alunos text-center">Não-Alunos</th>
+                                <th class="col-atividade-receita text-end">Receita</th>
+                                <th class="col-atividade-custo text-end">Custo</th>
+                                <th class="col-atividade-lucro text-end">Lucro</th>
+                                <th class="col-atividade-margem text-center">Margem</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        '''
+        
+        for ativ in atividades:
+            atividades_html += f'''
+                            <tr>
+                                <td class="col-atividade-nome">
+                                    <span class="text-truncate-cell" title="{ativ.get('nome', 'Sem nome')}">
+                                        {ativ.get('nome', 'Sem nome')}
+                                    </span>
+                                </td>
+                                <td class="col-atividade-segmento">
+                                    <span class="badge badge-fixed" style="background-color: {SEGMENTOS.get(ativ.get('segmento', 'ei'), {}).get('cor', '#ccc')}">
+                                        {SEGMENTOS.get(ativ.get('segmento', 'ei'), {}).get('nome', 'EI')}
+                                    </span>
+                                </td>
+                                <td class="col-atividade-alunos text-center">{ativ.get('alunos', 0)}</td>
+                                <td class="col-atividade-nao-alunos text-center">{ativ.get('nao_alunos', 0)}</td>
+                                <td class="col-atividade-receita text-end text-success">R$ {ativ.get('receita_mensal', 0):,.2f}</td>
+                                <td class="col-atividade-custo text-end text-danger">R$ {ativ.get('custo_total_mensal', 0):,.2f}</td>
+                                <td class="col-atividade-lucro text-end { 'text-success' if ativ.get('lucro_mensal', 0) > 0 else 'text-danger' }">
+                                    R$ {ativ.get('lucro_mensal', 0):,.2f}
+                                </td>
+                                <td class="col-atividade-margem text-center">
+                                    <span class="badge badge-fixed { 'bg-success' if ativ.get('margem_atividade', 0) >= 30 else 'bg-warning' if ativ.get('margem_atividade', 0) >= 15 else 'bg-danger' }">
+                                        {ativ.get('margem_atividade', 0):.1f}%
+                                    </span>
+                                </td>
+                            </tr>
             '''
         
-        cor_info = cores_categoria.get(categoria, {'bg': 'secondary', 'icon': 'cube'})
-        tabelas_custos += f'''
-        <div class="col-md-6 mb-3">
-            <div class="card h-100 shadow-sm border-0">
-                <div class="card-header bg-{cor_info['bg']} text-white">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <i class="fas fa-{cor_info['icon']}"></i>
-                            <strong>{categoria.replace('_', ' ').title()}</strong>
-                        </div>
-                        <h5 class="mb-0">R$ {info['total']:,.2f}</h5>
-                    </div>
-                </div>
-                <div class="card-body p-0">
-                    <table class="table table-sm mb-0 table-hover">
-                        <tbody>
-                            {linhas}
+        atividades_html += '''
                         </tbody>
                     </table>
                 </div>
@@ -1643,1129 +1774,109 @@ def resultado():
         </div>
         '''
     
-    # Resumo de custos totais
-    custo_total = sum(info['total'] for info in custos_detalhados['categorias'].values())
-    resumo_custos = f'''
-    <div class="row mt-3">
-        <div class="col-12">
-            <div class="alert alert-primary mb-0">
-                <div class="row align-items-center">
-                    <div class="col-md-6">
-                        <h6 class="mb-2"><i class="fas fa-calculator"></i> <strong>Custo Total de Implementação:</strong></h6>
-                        <h3 class="text-primary mb-0">R$ {custo_total:,.2f}</h3>
-                    </div>
-                    <div class="col-md-6">
-                        <div class="row text-center">
-    '''
-    
-    # Adicionar mini cards com percentual de cada categoria
-    for categoria, info in custos_detalhados['categorias'].items():
-        if custo_total > 0:
-            percentual = (info['total'] / custo_total) * 100
-            cor_info = cores_categoria.get(categoria, {'bg': 'secondary', 'icon': 'cube'})
-            resumo_custos += f'''
-                            <div class="col-md-4">
-                                <small class="text-muted">{categoria.title()}</small><br>
-                                <strong class="text-{cor_info['bg']}">{percentual:.1f}%</strong>
-                            </div>
-            '''
-    
-    resumo_custos += '''
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    '''
-    
-    tabelas_custos += resumo_custos
-    
-    # Gerar gráfico de distribuição de custos
-    chart_data_labels = []
-    chart_data_values = []
-    chart_background_colors = [
-        'rgba(54, 162, 235, 0.7)',   # Professores - azul
-        'rgba(75, 192, 192, 0.7)',   # Infraestrutura - verde água
-        'rgba(255, 206, 86, 0.7)',   # Material - amarelo
-        'rgba(255, 99, 132, 0.7)',   # Marketing - vermelho
-        'rgba(153, 102, 255, 0.7)',  # RH - roxo
-        'rgba(201, 203, 207, 0.7)'   # Outros - cinza
-    ]
-    
-    for i, (categoria, info) in enumerate(custos_detalhados['categorias'].items()):
-        if info['total'] > 0:
-            chart_data_labels.append(categoria.title())
-            chart_data_values.append(info['total'])
-    
-    chart_js = f'''
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {{
-        // Gráfico de distribuição de custos
-        const ctx1 = document.getElementById('chartCustos').getContext('2d');
-        new Chart(ctx1, {{
-            type: 'pie',
-            data: {{
-                labels: {json.dumps(chart_data_labels)},
-                datasets: [{{
-                    data: {json.dumps(chart_data_values)},
-                    backgroundColor: {json.dumps(chart_background_colors[:len(chart_data_labels)])},
-                    borderWidth: 1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{
-                    legend: {{ position: 'bottom' }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: function(context) {{
-                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                                const percentage = Math.round((context.parsed / total) * 100);
-                                return context.label + ': R$ ' + context.parsed.toLocaleString('pt-BR') + 
-                                       ' (' + percentage + '%)';
-                            }}
-                        }}
-                    }}
-                }}
-            }}
-        }});
-        
-        // Gráfico de receitas
-        const ctx2 = document.getElementById('chartReceitas').getContext('2d');
-        new Chart(ctx2, {{
-            type: 'bar',
-            data: {{
-                labels: ['Receita Atual', 'Receita Projetada'],
-                datasets: [{{
-                    label: 'Valor em R$',
-                    data: [{dados['resultados']['receita_atual']}, {dados['resultados']['receita_projetada']}],
-                    backgroundColor: [
-                        'rgba(54, 162, 235, 0.5)',
-                        'rgba(75, 192, 192, 0.5)'
-                    ],
-                    borderColor: [
-                        'rgba(54, 162, 235, 1)',
-                        'rgba(75, 192, 192, 1)'
-                    ],
-                    borderWidth: 1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{
-                    legend: {{ display: false }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: function(context) {{
-                                return 'R$ ' + context.parsed.y.toLocaleString('pt-BR');
-                            }}
-                        }}
-                    }}
-                }},
-                scales: {{
-                    y: {{
-                        beginAtZero: true,
-                        ticks: {{
-                            callback: function(value) {{
-                                return 'R$ ' + value.toLocaleString('pt-BR');
-                            }}
-                        }}
-                    }}
-                }}
-            }}
-        }});
-    }});
-    
-    function recalcularSimulacao() {{
-        const alunos_atuais = parseFloat(document.getElementById('edit_alunos_atuais').value);
-        const aumento_esperado = parseFloat(document.getElementById('edit_aumento_esperado').value);
-        const receita_alunos = parseFloat(document.getElementById('edit_receita_alunos').value);
-        const receita_nao_alunos = parseFloat(document.getElementById('edit_receita_nao_alunos').value);
-        const quantidade_alunos = parseFloat(document.getElementById('edit_quantidade_alunos').value);
-        const quantidade_nao_alunos = parseFloat(document.getElementById('edit_quantidade_nao_alunos').value);
-        const investimento = parseFloat(document.getElementById('edit_investimento').value);
-        const custos_mensais = parseFloat(document.getElementById('edit_custos_mensais').value);
-        
-        const dados_recalculo = {{
-            alunos_atuais: alunos_atuais,
-            aumento_esperado: aumento_esperado,
-            receita_alunos_atividade: receita_alunos,
-            receita_nao_alunos_atividade: receita_nao_alunos,
-            quantidade_alunos_atividade: quantidade_alunos,
-            quantidade_nao_alunos_atividade: quantidade_nao_alunos,
-            investimento_total_editado: investimento,
-            custos_mensais_editado: custos_mensais
-        }};
-        
-        fetch('/api/recalcular', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify(dados_recalculo)
-        }})
-        .then(response => response.json())
-        .then(data => {{
-            if (data.sucesso) {{
-                const resultDiv = document.getElementById('resultado-recalculo');
-                const novoPayback = data.resultados.payback_meses >= 999999 ? '∞' : data.resultados.payback_meses.toFixed(1);
-                
-                resultDiv.innerHTML = `
-                    <div class="alert alert-success">
-                        <h6><i class="fas fa-check-circle"></i> Resultados Recalculados com Sucesso!</h6>
-                        <div class="row mt-3">
-                            <div class="col-md-2">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small class="text-muted">Total Participantes</small>
-                                    <h4 class="text-primary">${{data.resultados.novos_alunos}}</h4>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small class="text-muted">Alunos</small>
-                                    <h4 class="text-info">${{data.resultados.novos_alunos_atividade}}</h4>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small class="text-muted">Não-Alunos</small>
-                                    <h4 class="text-info">${{data.resultados.novos_nao_alunos_atividade}}</h4>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small class="text-muted">Receita Mensal</small>
-                                    <h4 class="text-success">R$ ${{data.resultados.receita_mensal.toLocaleString('pt-BR', {{minimumFractionDigits: 0}})}}</h4>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small class="text-muted">Lucro Mensal</small>
-                                    <h4 class="text-success">R$ ${{data.resultados.lucro_mensal.toLocaleString('pt-BR', {{minimumFractionDigits: 0}})}}</h4>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small class="text-muted">ROI Anual</small>
-                                    <h4 class="text-warning">${{data.resultados.roi_percentual.toFixed(1)}}%</h4>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="row mt-2">
-                            <div class="col-md-6">
-                                <small><strong>Payback:</strong> ${{novoPayback}} meses</small>
-                            </div>
-                            <div class="col-md-6">
-                                <small><strong>Investimento:</strong> R$ ${{data.resultados.investimento_total.toLocaleString('pt-BR', {{minimumFractionDigits: 0}})}}</small>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }} else {{
-                alert('Erro ao recalcular: ' + (data.error || 'Desconhecido'));
-            }}
-        }})
-                        .catch(error => alert('Erro na requisição: ' + error.message));
-    }}
-    
-    function salvarParametrosEscola() {{
-        const custoProfHora = parseFloat(document.getElementById('edit_custo_prof_hora').value);
-        const materialAluno = parseFloat(document.getElementById('edit_material_aluno').value);
-        const ratioProf = parseFloat(document.getElementById('edit_ratio_prof').value);
-        
-        const dados = {{
-            custo_professor_por_hora: custoProfHora,
-            material_mensal_por_aluno: materialAluno,
-            ratio_professor_aluno: ratioProf
-        }};
-        
-        fetch('/api/salvar-parametros', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify(dados)
-        }})
-        .then(response => {{
-            if (!response.ok) {{
-                throw new Error('Erro na resposta do servidor: ' + response.status);
-            }}
-            return response.json();
-        }})
-        .then(data => {{
-            if (data.sucesso) {{
-                document.getElementById('resultado-params').innerHTML = 
-                    '<div class="alert alert-success"><i class="fas fa-check"></i> ✅ Parâmetros salvos com sucesso!</div>';
-                setTimeout(() => {{
-                    document.getElementById('resultado-params').innerHTML = '';
-                }}, 3000);
-            }} else {{
-                document.getElementById('resultado-params').innerHTML = 
-                    '<div class="alert alert-danger"><i class="fas fa-exclamation"></i> Erro: ' + (data.error || 'Desconhecido') + '</div>';
-            }}
-        }})
-        .catch(error => {{
-            document.getElementById('resultado-params').innerHTML = 
-                '<div class="alert alert-danger"><i class="fas fa-exclamation"></i> Erro: ' + error.message + '</div>';
-            console.error('Erro ao salvar:', error);
-        }});
-    }}
-    
-    function salvarCustosAtividades() {{
-        const atividades = {{}};
-        const costInputs = document.querySelectorAll('.cost-input');
-        
-        // Agrupar valores por atividade
-        costInputs.forEach(input => {{
-            const atividade = input.getAttribute('data-atividade');
-            const categoria = input.getAttribute('data-categoria');
-            const item = input.getAttribute('data-item');
-            const valor = parseFloat(input.value) || 0;
-            
-            if (!atividades[atividade]) {{
-                atividades[atividade] = {{}};
-            }}
-            if (!atividades[atividade][categoria]) {{
-                atividades[atividade][categoria] = {{}};
-            }}
-            atividades[atividade][categoria][item] = valor;
-        }});
-        
-        // Enviar para o servidor
-        fetch('/api/salvar-atividades', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify(atividades)
-        }})
-        .then(response => {{
-            if (!response.ok) {{
-                throw new Error('Erro na resposta do servidor: ' + response.status);
-            }}
-            return response.json();
-        }})
-        .then(data => {{
-            if (data.sucesso) {{
-                document.getElementById('resultado-atividades').innerHTML = 
-                    '<div class="alert alert-success"><i class="fas fa-check"></i> ✅ Custos de todas as atividades salvos com sucesso!</div>';
-                setTimeout(() => {{
-                    document.getElementById('resultado-atividades').innerHTML = '';
-                }}, 3000);
-            }} else {{
-                document.getElementById('resultado-atividades').innerHTML = 
-                    '<div class="alert alert-danger"><i class="fas fa-exclamation"></i> Erro: ' + (data.error || 'Desconhecido') + '</div>';
-            }}
-        }})
-        .catch(error => {{
-            document.getElementById('resultado-atividades').innerHTML = 
-                '<div class="alert alert-danger"><i class="fas fa-exclamation"></i> Erro: ' + error.message + '</div>';
-            console.error('Erro ao salvar:', error);
-        }});
-    }}
-    
-    // Preencher acordeão de atividades ao carregar
-    document.addEventListener('DOMContentLoaded', function() {{
-        const atividades = {json.dumps(dados['custos_detalhados']['atividades_selecionadas'])};
-        const acordeaoContainer = document.getElementById('atividades-accordion');
-        
-        if (!acordeaoContainer) return;
-        
-        let acordeaoHtml = '<div class="accordion" id="atividadesAccordion">';
-        
-        atividades.forEach((atividade, index) => {{
-            acordeaoHtml += `
-                <div class="accordion-item" data-atividade="${{atividade}}">
-                    <h2 class="accordion-header">
-                        <button class="accordion-button ${{index > 0 ? 'collapsed' : ''}}" type="button" data-bs-toggle="collapse" data-bs-target="#atividade${{index}}">
-                            <i class="fas fa-cogs"></i> <strong>${{atividade}}</strong>
-                        </button>
-                    </h2>
-                    <div id="atividade${{index}}" class="accordion-collapse collapse ${{index === 0 ? 'show' : ''}}" data-bs-parent="#atividadesAccordion">
-                        <div class="accordion-body">
-                            <ul class="nav nav-tabs mb-3" role="tablist">
-                                <li class="nav-item" role="presentation">
-                                    <button class="nav-link active" id="tab-infra-${{index}}" data-bs-toggle="tab" data-bs-target="#infra-${{index}}" type="button" role="tab">
-                                        <i class="fas fa-building"></i> Infraestrutura
-                                    </button>
-                                </li>
-                                <li class="nav-item" role="presentation">
-                                    <button class="nav-link" id="tab-material-${{index}}" data-bs-toggle="tab" data-bs-target="#material-${{index}}" type="button" role="tab">
-                                        <i class="fas fa-book"></i> Material
-                                    </button>
-                                </li>
-                                <li class="nav-item" role="presentation">
-                                    <button class="nav-link" id="tab-marketing-${{index}}" data-bs-toggle="tab" data-bs-target="#marketing-${{index}}" type="button" role="tab">
-                                        <i class="fas fa-bullhorn"></i> Marketing
-                                    </button>
-                                </li>
-                                <li class="nav-item" role="presentation">
-                                    <button class="nav-link" id="tab-rh-${{index}}" data-bs-toggle="tab" data-bs-target="#rh-${{index}}" type="button" role="tab">
-                                        <i class="fas fa-users"></i> RH
-                                    </button>
-                                </li>
-                                <li class="nav-item" role="presentation">
-                                    <button class="nav-link" id="tab-mensal-${{index}}" data-bs-toggle="tab" data-bs-target="#mensal-${{index}}" type="button" role="tab">
-                                        <i class="fas fa-money-bill"></i> Custos Mensais
-                                    </button>
-                                </li>
-                            </ul>
-                            
-                            <div class="tab-content">
-                                <!-- INFRAESTRUTURA -->
-                                <div class="tab-pane fade show active" id="infra-${{index}}" role="tabpanel">
-                                    <div class="alert alert-info"><small><i class="fas fa-edit"></i> Edite os valores de infraestrutura específicos desta atividade</small></div>
-                                    <div id="infra-items-${{index}}"></div>
-                                </div>
-                                
-                                <!-- MATERIAL -->
-                                <div class="tab-pane fade" id="material-${{index}}" role="tabpanel">
-                                    <div class="alert alert-info"><small><i class="fas fa-edit"></i> Edite os valores de material específicos desta atividade</small></div>
-                                    <div id="material-items-${{index}}"></div>
-                                </div>
-                                
-                                <!-- MARKETING -->
-                                <div class="tab-pane fade" id="marketing-${{index}}" role="tabpanel">
-                                    <div class="alert alert-info"><small><i class="fas fa-edit"></i> Edite os valores de marketing específicos desta atividade</small></div>
-                                    <div id="marketing-items-${{index}}"></div>
-                                </div>
-                                
-                                <!-- RH -->
-                                <div class="tab-pane fade" id="rh-${{index}}" role="tabpanel">
-                                    <div class="alert alert-info"><small><i class="fas fa-edit"></i> Edite os valores de RH específicos desta atividade</small></div>
-                                    <div id="rh-items-${{index}}"></div>
-                                </div>
-                                
-                                <!-- CUSTOS MENSAIS -->
-                                <div class="tab-pane fade" id="mensal-${{index}}" role="tabpanel">
-                                    <div class="alert alert-info"><small><i class="fas fa-edit"></i> Edite os valores de custos mensais específicos desta atividade</small></div>
-                                    <div id="mensal-items-${{index}}"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }});
-        
-        acordeaoHtml += '</div>';
-        acordeaoContainer.innerHTML = acordeaoHtml;
-        
-        // Preencher os itens de cada categoria para cada atividade
-        const custos = {json.dumps(dados['custos_detalhados']['categorias'])};
-        
-        atividades.forEach((atividade, index) => {{
-            // Infraestrutura
-            let infraHtml = '';
-            (custos.infraestrutura?.detalhes || []).forEach(item => {{
-                infraHtml += `
-                    <div class="mb-3">
-                        <label class="form-label"><strong>${{item.item}}</strong></label>
-                        <div class="input-group">
-                            <span class="input-group-text">R$</span>
-                            <input type="number" class="form-control cost-input" data-atividade="${{atividade}}" data-categoria="infraestrutura" data-item="${{item.item}}" placeholder="Valor" min="0" step="100">
-                        </div>
-                        <small class="text-muted">${{item.descricao || ''}}</small>
-                    </div>
-                `;
-            }});
-            document.getElementById(`infra-items-${{index}}`).innerHTML = infraHtml;
-            
-            // Material
-            let materialHtml = '';
-            (custos.material?.detalhes || []).forEach(item => {{
-                materialHtml += `
-                    <div class="mb-3">
-                        <label class="form-label"><strong>${{item.item}}</strong></label>
-                        <div class="input-group">
-                            <span class="input-group-text">R$</span>
-                            <input type="number" class="form-control cost-input" data-atividade="${{atividade}}" data-categoria="material" data-item="${{item.item}}" placeholder="Valor" min="0" step="100">
-                        </div>
-                        <small class="text-muted">${{item.descricao || ''}}</small>
-                    </div>
-                `;
-            }});
-            document.getElementById(`material-items-${{index}}`).innerHTML = materialHtml;
-            
-            // Marketing
-            let marketingHtml = '';
-            (custos.marketing?.detalhes || []).forEach(item => {{
-                marketingHtml += `
-                    <div class="mb-3">
-                        <label class="form-label"><strong>${{item.item}}</strong></label>
-                        <div class="input-group">
-                            <span class="input-group-text">R$</span>
-                            <input type="number" class="form-control cost-input" data-atividade="${{atividade}}" data-categoria="marketing" data-item="${{item.item}}" placeholder="Valor" min="0" step="100">
-                        </div>
-                        <small class="text-muted">${{item.descricao || ''}}</small>
-                    </div>
-                `;
-            }});
-            document.getElementById(`marketing-items-${{index}}`).innerHTML = marketingHtml;
-            
-            // RH
-            let rhHtml = '';
-            (custos.recursos_humanos?.detalhes || []).forEach(item => {{
-                rhHtml += `
-                    <div class="mb-3">
-                        <label class="form-label"><strong>${{item.item}}</strong></label>
-                        <div class="input-group">
-                            <span class="input-group-text">R$</span>
-                            <input type="number" class="form-control cost-input" data-atividade="${{atividade}}" data-categoria="recursos_humanos" data-item="${{item.item}}" placeholder="Valor" min="0" step="100">
-                        </div>
-                        <small class="text-muted">${{item.descricao || ''}}</small>
-                    </div>
-                `;
-            }});
-            document.getElementById(`rh-items-${{index}}`).innerHTML = rhHtml;
-            
-            // Custos Mensais
-            let mensalHtml = '';
-            (custos.custos_mensais?.detalhes || []).forEach(item => {{
-                mensalHtml += `
-                    <div class="mb-3">
-                        <label class="form-label"><strong>${{item.item}}</strong></label>
-                        <div class="input-group">
-                            <span class="input-group-text">R$/mês</span>
-                            <input type="number" class="form-control cost-input" data-atividade="${{atividade}}" data-categoria="custos_mensais" data-item="${{item.item}}" placeholder="Valor mensal" min="0" step="100">
-                        </div>
-                        <small class="text-muted">${{item.descricao || ''}}</small>
-                    </div>
-                `;
-            }});
-            document.getElementById(`mensal-items-${{index}}`).innerHTML = mensalHtml;
-        }});
-    }});
-    </script>
-    '''
-    
     content = f'''
     <div class="row">
-        <div class="col-lg-10 mx-auto">
+        <div class="col-lg-12">
             <div class="card shadow mb-4">
-                <div class="card-header bg-primary text-white">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <h3 class="mb-0"><i class="fas fa-chart-pie"></i> Análise Detalhada da Projeção</h3>
-                            <p class="mb-0">
-                                Nível: <span class="badge badge-{dados['custos_detalhados']['nivel_escolar']}">
-                                    {dados['custos_detalhados']['nivel_escolar'].replace('_', ' ').title()}
-                                </span>
-                                | Aumento: {dados['dados_entrada']['aumento_esperado']}%
-                                | Atividades: {len(dados['custos_detalhados']['atividades_selecionadas'])}
-                            </p>
-                        </div>
-                        <span class="badge bg-light text-primary fs-6">
-                            ROI: {dados['resultados']['roi_percentual']:.1f}%
-                        </span>
-                    </div>
+                <div class="card-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                    <h3 class="mb-0"><i class="fas fa-chart-line"></i> Resultados da Simulação: {nome_simulacao}</h3>
                 </div>
                 <div class="card-body">
                     <div class="row">
                         <div class="col-md-8">
-                            <div class="card">
-                                <div class="card-header bg-info text-white">
-                                    <h5 class="mb-0"><i class="fas fa-chart-bar"></i> Comparativo de Receitas</h5>
-                                </div>
-                                <div class="card-body">
-                                    <canvas id="chartReceitas" height="200"></canvas>
-                                </div>
-                            </div>
+                            {analise_html}
                         </div>
                         <div class="col-md-4">
-                            <div class="card">
-                                <div class="card-header bg-success text-white">
-                                    <h5 class="mb-0"><i class="fas fa-user-plus"></i> Crescimento</h5>
-                                </div>
-                                <div class="card-body text-center">
-                                    <h1 class="display-1 text-primary">{dados['resultados']['novos_alunos']}</h1>
-                                    <p class="lead">Novos Participantes</p>
-                                    <div class="progress" style="height: 30px;">
-                                        <div class="progress-bar bg-success" role="progressbar" 
-                                             style="width: {dados['dados_entrada']['aumento_esperado']}%">
-                                            {dados['dados_entrada']['aumento_esperado']}% de Aumento
-                                        </div>
-                                    </div>
-                                    <table class="table table-sm mt-3 mb-0">
-                                        <tr>
-                                            <td><small><strong>Alunos da escola:</strong></small></td>
-                                            <td class="text-end"><strong class="text-info">{dados['resultados']['novos_alunos_atividade']}</strong></td>
-                                        </tr>
-                                        <tr>
-                                            <td><small><strong>Não-alunos:</strong></small></td>
-                                            <td class="text-end"><strong class="text-info">{dados['resultados']['novos_nao_alunos_atividade']}</strong></td>
-                                        </tr>
-                                    </table>
-                                    <p class="mt-3 mb-0">
-                                        <small>Professores necessários: <strong>{dados['resultados']['professores_necessarios']}</strong></small>
-                                    </p>
-                                </div>
-                            </div>
+                            {resultados_html}
                         </div>
                     </div>
                     
                     <div class="row mt-4">
                         <div class="col-md-6">
-                            <div class="card">
-                                <div class="card-header bg-warning text-dark">
-                                    <h5 class="mb-0"><i class="fas fa-money-bill-wave"></i> Indicadores Financeiros</h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="row text-center">
-                                        <div class="col-6">
-                                            <div class="p-3 border rounded bg-light">
-                                                <h6>Payback</h6>
-                                                <h3 class="text-primary">{dados['resultados']['payback_meses']:.1f} meses</h3>
-                                                <small>Tempo para recuperar investimento</small>
-                                            </div>
-                                        </div>
-                                        <div class="col-6">
-                                            <div class="p-3 border rounded bg-light">
-                                                <h6>ROI Anual</h6>
-                                                <h3 class="text-success">{dados['resultados']['roi_percentual']:.1f}%</h3>
-                                                <small>Retorno sobre investimento</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <table class="table table-bordered mt-3">
-                                        <tr>
-                                            <th>Investimento Total:</th>
-                                            <td class="text-end">R$ {dados['resultados']['investimento_total']:,.2f}</td>
-                                        </tr>
-                                        <tr>
-                                            <th>Retorno Mensal:</th>
-                                            <td class="text-end text-success">R$ {dados['resultados']['retorno_mensal']:,.2f}</td>
-                                        </tr>
-                                        <tr>
-                                            <th>Lucro Anual Projetado:</th>
-                                            <td class="text-end text-success">R$ {dados['resultados']['retorno_mensal'] * 12:,.2f}</td>
-                                        </tr>
-                                        <tr>
-                                            <th>Custo médio por aluno:</th>
-                                            <td class="text-end">R$ {dados['resultados']['custo_medio_por_aluno']:,.2f}</td>
-                                        </tr>
-                                    </table>
-                                </div>
-                            </div>
+                            {alertas_html}
+                            {pontos_html}
                         </div>
-                        
-                        <div class="col-md-6">
-                            <div class="card">
-                                <div class="card-header bg-danger text-white">
-                                    <h5 class="mb-0"><i class="fas fa-chart-pie"></i> Distribuição de Custos</h5>
-                                </div>
-                                <div class="card-body">
-                                    <canvas id="chartCustos" height="200"></canvas>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row mt-4">
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header bg-dark text-white">
-                                    <h5 class="mb-0"><i class="fas fa-list-alt"></i> Detalhamento de Custos por Categoria</h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="row">
-                                        {tabelas_custos}
-                                    </div>
-                                    
-                                    <div class="alert alert-info mt-4">
-                                        <h6><i class="fas fa-lightbulb"></i> Atividades Selecionadas:</h6>
-                                        <div class="mt-2">
-                                            {', '.join(dados['custos_detalhados']['atividades_selecionadas']) if dados['custos_detalhados']['atividades_selecionadas'] else 'Nenhuma atividade selecionada'}
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row mt-4">
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header bg-secondary text-white">
-                                    <h5 class="mb-0"><i class="fas fa-edit"></i> Editar Dados para Análise de Sensibilidade</h5>
-                                </div>
-                                <div class="card-body">
-                                    <p class="text-muted">Modifique os valores abaixo para ver como impactam a viabilidade financeira:</p>
-                                    <div class="row">
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label"><strong>Alunos (Participantes):</strong></label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_quantidade_alunos" 
-                                                       value="{dados['resultados']['novos_alunos_atividade']}" 
-                                                       min="0" onchange="recalcularSimulacao()">
-                                                <small class="text-muted">Quantidade de alunos na atividade</small>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label"><strong>Não-Alunos (Participantes):</strong></label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_quantidade_nao_alunos" 
-                                                       value="{dados['resultados']['novos_nao_alunos_atividade']}" 
-                                                       min="0" onchange="recalcularSimulacao()">
-                                                <small class="text-muted">Quantidade de não-alunos na atividade</small>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label">Receita Alunos (R$/mês):</label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_receita_alunos" 
-                                                       value="{dados['dados_entrada']['receita_alunos_atividade']}" 
-                                                       min="10" step="10" onchange="recalcularSimulacao()">
-                                            </div>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label">Receita Não-alunos (R$/mês):</label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_receita_nao_alunos" 
-                                                       value="{dados['dados_entrada']['receita_nao_alunos_atividade']}" 
-                                                       min="10" step="10" onchange="recalcularSimulacao()">
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="row">
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label">Alunos Atuais (escola):</label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_alunos_atuais" 
-                                                       value="{dados['dados_entrada']['alunos_atuais']}" 
-                                                       min="1" onchange="recalcularSimulacao()">
-                                            </div>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label">Aumento Esperado (%):</label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_aumento_esperado" 
-                                                       value="{dados['dados_entrada']['aumento_esperado']}" 
-                                                       min="10" max="50" onchange="recalcularSimulacao()">
-                                            </div>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label">Investimento Total (R$):</label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_investimento" 
-                                                       value="{dados['resultados']['investimento_total']}" 
-                                                       min="0" step="100" onchange="recalcularSimulacao()">
-                                            </div>
-                                        </div>
-                                        <div class="col-md-3">
-                                            <div class="mb-3">
-                                                <label class="form-label">Custos Mensais (R$):</label>
-                                                <input type="number" class="form-control edit-value" 
-                                                       id="edit_custos_mensais" 
-                                                       value="{dados['resultados']['custo_mensal_operacional']}" 
-                                                       min="0" step="100" onchange="recalcularSimulacao()">
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="row">
-                                        <div class="col-12">
-                                            <button class="btn btn-primary w-100" onclick="recalcularSimulacao()">
-                                                <i class="fas fa-sync"></i> Recalcular com Novos Valores
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div id="resultado-recalculo" class="mt-3"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row mt-4">
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header bg-info text-white">
-                                    <h5 class="mb-0"><i class="fas fa-tasks"></i> Editar Custos por Atividade & Parâmetros da Escola</h5>
-                                </div>
-                                <div class="card-body">
-                                    <ul class="nav nav-tabs mb-3" role="tablist">
-                                        <li class="nav-item" role="presentation">
-                                            <button class="nav-link active" id="tab-params" data-bs-toggle="tab" data-bs-target="#params-content" type="button" role="tab">
-                                                <i class="fas fa-cog"></i> Parâmetros da Escola
-                                            </button>
-                                        </li>
-                                        <li class="nav-item" role="presentation">
-                                            <button class="nav-link" id="tab-atividades" data-bs-toggle="tab" data-bs-target="#atividades-content" type="button" role="tab">
-                                                <i class="fas fa-tasks"></i> Custos por Atividade
-                                            </button>
-                                        </li>
-                                    </ul>
-                                    
-                                    <div class="tab-content">
-                                        <!-- TAB 1: Parâmetros da Escola -->
-                                        <div class="tab-pane fade show active" id="params-content" role="tabpanel">
-                                            <h6 class="mb-3">Configure os valores padrão para o nível escolar:</h6>
-                                            <div class="row">
-                                                <div class="col-md-4">
-                                                    <div class="mb-3">
-                                                        <label class="form-label"><strong>Custo Professor/Hora (R$):</strong></label>
-                                                        <input type="number" class="form-control" 
-                                                               id="edit_custo_prof_hora" 
-                                                               value="{CUSTOS_POR_NIVEL[dados['custos_detalhados']['nivel_escolar']]['custo_professor_por_hora']}" 
-                                                               min="10" step="5">
-                                                        <small class="text-muted">Valor pago ao professor por hora</small>
-                                                    </div>
-                                                </div>
-                                                <div class="col-md-4">
-                                                    <div class="mb-3">
-                                                        <label class="form-label"><strong>Material/Aluno/Mês (R$):</strong></label>
-                                                        <input type="number" class="form-control" 
-                                                               id="edit_material_aluno" 
-                                                               value="{CUSTOS_POR_NIVEL[dados['custos_detalhados']['nivel_escolar']]['material_mensal_por_aluno']}" 
-                                                               min="5" step="5">
-                                                        <small class="text-muted">Custo mensal de material por aluno</small>
-                                                    </div>
-                                                </div>
-                                                <div class="col-md-4">
-                                                    <div class="mb-3">
-                                                        <label class="form-label"><strong>Ratio Professor/Alunos:</strong></label>
-                                                        <input type="number" class="form-control" 
-                                                               id="edit_ratio_prof" 
-                                                               value="{CUSTOS_POR_NIVEL[dados['custos_detalhados']['nivel_escolar']]['ratio_professor_aluno']}" 
-                                                               min="5" step="1">
-                                                        <small class="text-muted">Ex: 1 professor para cada N alunos</small>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <button class="btn btn-info" onclick="salvarParametrosEscola()">
-                                                <i class="fas fa-save"></i> Salvar Parâmetros
-                                            </button>
-                                            <div id="resultado-params" class="mt-2"></div>
-                                        </div>
-                                        
-                                        <!-- TAB 2: Custos por Atividade -->
-                                        <div class="tab-pane fade" id="atividades-content" role="tabpanel">
-                                            <h6 class="mb-3">📌 Edite os custos ESPECÍFICOS para cada atividade:</h6>
-                                            <div class="alert alert-warning mb-3">
-                                                <small><i class="fas fa-lightbulb"></i> Cada atividade pode ter custos diferentes de infraestrutura, material, marketing, etc.</small>
-                                            </div>
-                                            <div id="atividades-accordion"></div>
-                                            <button class="btn btn-info mt-3" onclick="salvarCustosAtividades()">
-                                                <i class="fas fa-save"></i> Salvar Todos os Custos das Atividades
-                                            </button>
-                                            <div id="resultado-atividades" class="mt-2"></div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row mt-4">
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header bg-success text-white">
-                                    <h5 class="mb-0"><i class="fas fa-lightbulb"></i> Recomendações Estratégicas</h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="alert {'alert-success' if dados['resultados']['roi_percentual'] > 100 else 'alert-warning'}">
-                                        <h5>
-                                            <i class="fas {'fa-check-circle' if dados['resultados']['roi_percentual'] > 100 else 'fa-exclamation-triangle'}"></i> 
-                                            Viabilidade Financeira: {'ALTA' if dados['resultados']['roi_percentual'] > 100 else 'MODERADA'}
-                                        </h5>
-                                        <p>
-                                            O ROI de {dados['resultados']['roi_percentual']:.1f}% indica 
-                                            {'um excelente retorno sobre o investimento' if dados['resultados']['roi_percentual'] > 100 else 'um retorno satisfatório sobre o investimento'}.
-                                            Payback estimado em {dados['resultados']['payback_meses']:.1f} meses.
-                                        </p>
-                                    </div>
-                                    
-                                    <div class="row">
-                                        <div class="col-md-6">
-                                            <div class="card mb-3">
-                                                <div class="card-body">
-                                                    <h6><i class="fas fa-thumbs-up text-success"></i> Pontos Fortes</h6>
-                                                    <ul>
-                                                        <li>Aumento significativo de matrículas ({dados['dados_entrada']['aumento_esperado']}%)</li>
-                                                        <li>Receita adicional mensal: R$ {dados['resultados']['retorno_mensal']:,.2f}</li>
-                                                        <li>Diferenciação competitiva no mercado</li>
-                                                        <li>Oferta especializada para {dados['custos_detalhados']['nivel_escolar'].replace('_', ' ')}</li>
-                                                    </ul>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <div class="card mb-3">
-                                                <div class="card-body">
-                                                    <h6><i class="fas fa-exclamation-triangle text-warning"></i> Considerações</h6>
-                                                    <ul>
-                                                        <li>Necessidade de {dados['resultados']['professores_necessarios']} professores especializados</li>
-                                                        <li>Investimento inicial: R$ {dados['resultados']['investimento_total']:,.2f}</li>
-                                                        <li>Gerenciamento de múltiplas atividades</li>
-                                                        <li>Adequação da infraestrutura necessária</li>
-                                                    </ul>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="text-center mt-3">
-                                        <a href="/simulacao" class="btn btn-primary me-2">
-                                            <i class="fas fa-redo"></i> Nova Simulação
-                                        </a>
-                                        <a href="/dashboard" class="btn btn-success me-2">
-                                            <i class="fas fa-tachometer-alt"></i> Dashboard
-                                        </a>
-                                        <button class="btn btn-info me-2" onclick="window.print()">
-                                            <i class="fas fa-print"></i> Imprimir Relatório
-                                        </button>
-                                        <a href="/simulacao/exportar" class="btn btn-warning">
-                                            <i class="fas fa-file-excel"></i> Exportar Dados
-                                        </a>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {chart_js}
-    '''
-    return get_base_html("Resultados Detalhados - Business Plan", content)
-
-@app.route('/dashboard')
-def dashboard():
-    # Buscar todas as simulações
-    simulacoes_db = buscar_simulacoes()
-    
-    # Converter para lista de dicionários
-    simulacoes = []
-    for s in simulacoes_db:
-        # Converter sqlite3.Row para dicionário
-        s_dict = dict(s) if hasattr(s, 'keys') else s
-        
-        try:
-            data_criacao = datetime.strptime(s_dict.get('data_criacao', ''), '%Y-%m-%d %H:%M:%S')
-        except:
-            data_criacao = datetime.now()
-            
-        # Carregar dados extras
-        dados_extras = json.loads(s_dict.get('dados', '{}')) if s_dict.get('dados') else {}
-        
-        simulacoes.append({
-            'id': s_dict.get('id', 0),
-            'nome': s_dict.get('nome', f'Simulação #{s_dict.get("id", "?")}'),
-            'data_criacao': data_criacao,
-            'alunos_atuais': s_dict.get('alunos_atuais', 0),
-            'mensalidade_media': s_dict.get('mensalidade_media', 0),
-            'aumento_esperado': s_dict.get('aumento_esperado', 0),
-            'novos_alunos': s_dict.get('novos_alunos', 0),
-            'nivel_escolar': s_dict.get('nivel_escolar', 'fundamental_i'),
-            'investimento_total': s_dict.get('investimento_total', 0),
-            'retorno_mensal': s_dict.get('retorno_mensal', 0),
-            'payback': s_dict.get('payback', 0),
-            'roi': s_dict.get('roi', 0),
-            'dados_extras': dados_extras
-        })
-    
-    # Estatísticas gerais
-    total_simulacoes = len(simulacoes)
-    
-    if total_simulacoes > 0:
-        media_aumento = sum([s['aumento_esperado'] for s in simulacoes]) / total_simulacoes
-        media_roi = sum([s['roi'] for s in simulacoes]) / total_simulacoes
-        media_payback = sum([s['payback'] for s in simulacoes]) / total_simulacoes
-    else:
-        media_aumento = media_roi = media_payback = 0
-    
-    # Criar tabela de simulações
-    tabela_html = ""
-    for s in simulacoes:
-        nivel_badge = f"<span class='badge badge-{s['nivel_escolar']}'>{s['nivel_escolar'].replace('_', ' ').title()}</span>"
-        
-        tabela_html += f'''
-        <tr>
-            <td>{s['data_criacao'].strftime('%d/%m/%Y')}</td>
-            <td>{s['nome']}</td>
-            <td>{nivel_badge}</td>
-            <td>{s['alunos_atuais']}</td>
-            <td><span class="badge bg-success">{s['novos_alunos']}</span></td>
-            <td><span class="badge bg-info">{s['aumento_esperado']}%</span></td>
-            <td>R$ {s['investimento_total']:,.2f}</td>
-            <td>
-                <span class="badge {'bg-success' if s['roi'] > 100 else 'bg-warning'}">
-                    {s['roi']:.1f}%
-                </span>
-            </td>
-            <td>{s['payback']:.1f} meses</td>
-            <td>
-                <a href="/editar-simulacao/{s['id']}" class="btn btn-sm btn-primary me-2">
-                    <i class="fas fa-edit"></i> Editar
-                </a>
-                <a href="/simulacao/{s['id']}" class="btn btn-sm btn-info">
-                    <i class="fas fa-eye"></i> Ver
-                </a>
-            </td>
-        </tr>
-        '''
-    
-    if total_simulacoes == 0:
-        tabela_html = '''
-        <tr>
-            <td colspan="10" class="text-center py-5">
-                <i class="fas fa-inbox fa-4x text-muted mb-3"></i>
-                <h4>Nenhuma simulação encontrada</h4>
-                <p>Realize sua primeira simulação para começar a análise</p>
-                <a href="/simulacao" class="btn btn-primary">
-                    <i class="fas fa-plus-circle"></i> Nova Simulação
-                </a>
-            </td>
-        </tr>
-        '''
-    
-    content = f'''
-    <div class="row">
-        <div class="col-12">
-            <div class="card shadow mb-4">
-                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-                    <h3 class="mb-0"><i class="fas fa-tachometer-alt"></i> Dashboard - Histórico de Simulações</h3>
-                    <span class="badge bg-light text-primary fs-6">{total_simulacoes} simulações</span>
-                </div>
-                <div class="card-body">
-                    <div class="row mb-4">
-                        <div class="col-md-3">
-                            <div class="card text-white bg-info mb-3">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <div>
-                                            <h6 class="card-title">Média de Aumento</h6>
-                                            <h2 class="mb-0">{media_aumento:.1f}%</h2>
-                                        </div>
-                                        <i class="fas fa-chart-line fa-3x opacity-50"></i>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card text-white bg-success mb-3">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <div>
-                                            <h6 class="card-title">ROI Médio</h6>
-                                            <h2 class="mb-0">{media_roi:.1f}%</h2>
-                                        </div>
-                                        <i class="fas fa-percentage fa-3x opacity-50"></i>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card text-white bg-warning mb-3">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <div>
-                                            <h6 class="card-title">Payback Médio</h6>
-                                            <h2 class="mb-0">{media_payback:.1f} meses</h2>
-                                        </div>
-                                        <i class="fas fa-calendar-alt fa-3x opacity-50"></i>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card text-white bg-danger mb-3">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <div>
-                                            <h6 class="card-title">Total Simulações</h6>
-                                            <h2 class="mb-0">{total_simulacoes}</h2>
-                                        </div>
-                                        <i class="fas fa-database fa-3x opacity-50"></i>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-12">
-                            <div class="card">
-                                <div class="card-header bg-dark text-white">
-                                    <h5 class="mb-0"><i class="fas fa-history"></i> Histórico de Simulações por Nível Escolar</h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="table-responsive">
-                                        <table class="table table-hover">
-                                            <thead class="table-light">
-                                                <tr>
-                                                    <th>Data</th>
-                                                    <th>Nome</th>
-                                                    <th>Nível</th>
-                                                    <th>Alunos</th>
-                                                    <th>Novos</th>
-                                                    <th>Aumento</th>
-                                                    <th>Investimento</th>
-                                                    <th>ROI</th>
-                                                    <th>Payback</th>
-                                                    <th>Ações</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {tabela_html}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row mt-4">
                         <div class="col-md-6">
                             <div class="card">
                                 <div class="card-header bg-info text-white">
-                                    <h5 class="mb-0"><i class="fas fa-chart-bar"></i> Distribuição por Nível Escolar</h5>
+                                    <h5 class="mb-0"><i class="fas fa-bullseye"></i> Benchmarks do Setor</h5>
                                 </div>
                                 <div class="card-body">
-                                    <canvas id="chartNiveis" height="200"></canvas>
+                                    <div class="benchmark-card">
+                                        <h6><i class="fas fa-tachometer-alt"></i> Margem de Lucro Ideal</h6>
+                                        <div class="progress">
+                                            <div class="progress-bar { 'bg-success' if resultados.get('margem_lucro', 0) >= 30 else 'bg-warning' if resultados.get('margem_lucro', 0) >= 15 else 'bg-danger' }" 
+                                                 style="width: {min(resultados.get('margem_lucro', 0), 100)}%">
+                                                {resultados.get('margem_lucro', 0):.1f}% (Meta: 30%)
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="benchmark-card">
+                                        <h6><i class="fas fa-chart-line"></i> ROI Mínimo Aceitável</h6>
+                                        <div class="progress">
+                                            <div class="progress-bar { 'bg-success' if resultados.get('roi_percentual', 0) >= 100 else 'bg-warning' if resultados.get('roi_percentual', 0) >= 50 else 'bg-danger' }" 
+                                                 style="width: {min(resultados.get('roi_percentual', 0) / 2, 100)}%">
+                                                {resultados.get('roi_percentual', 0):.1f}% (Meta: 100%)
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="benchmark-card">
+                                        <h6><i class="fas fa-clock"></i> Payback Máximo Recomendado</h6>
+                                        <div class="progress">
+                                            <div class="progress-bar { 'bg-success' if resultados.get('payback_meses', 0) <= 24 else 'bg-warning' if resultados.get('payback_meses', 0) <= 36 else 'bg-danger' }" 
+                                                 style="width: {max(0, 100 - (resultados.get('payback_meses', 0) / 36 * 100))}%">
+                                                {resultados.get('payback_meses', 0):.1f} meses (Máx: 36 meses)
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                        
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-warning text-white">
+                                    <h5 class="mb-0"><i class="fas fa-lightbulb"></i> Recomendações e Plano de Ação</h5>
+                                </div>
+                                <div class="card-body">
+                                    {recomendacoes_html}
+                                    {plano_acao_html}
+                                </div>
+                            </div>
+                        </div>
                         <div class="col-md-6">
                             <div class="card">
                                 <div class="card-header bg-success text-white">
-                                    <h5 class="mb-0"><i class="fas fa-bullseye"></i> Metas e Recomendações</h5>
+                                    <h5 class="mb-0"><i class="fas fa-chart-pie"></i> Distribuição</h5>
                                 </div>
                                 <div class="card-body">
-                                    <div class="alert alert-success">
-                                        <h5><i class="fas fa-trophy"></i> Metas por Nível</h5>
-                                        <ul class="mb-0">
-                                            <li><strong>Infantil:</strong> ROI mínimo 80%, Payback máximo 20 meses</li>
-                                            <li><strong>Fundamental:</strong> ROI mínimo 100%, Payback máximo 18 meses</li>
-                                            <li><strong>Médio:</strong> ROI mínimo 120%, Payback máximo 15 meses</li>
-                                        </ul>
-                                    </div>
-                                    
-                                    <div class="alert alert-info">
-                                        <h5><i class="fas fa-check-circle"></i> KPIs de Sucesso</h5>
-                                        <ul class="mb-0">
-                                            <li>Taxa de adesão às atividades: 70%+</li>
-                                            <li>Satisfação dos pais: 90%+</li>
-                                            <li>Retenção de alunos: 85%+</li>
-                                            <li>Crescimento orgânico: 10%+ ao ano</li>
-                                        </ul>
-                                    </div>
-                                    
-                                    <div class="text-center mt-3">
-                                        <a href="/simulacao" class="btn btn-primary">
-                                            <i class="fas fa-plus-circle"></i> Nova Simulação
-                                        </a>
-                                        <a href="/info" class="btn btn-info ms-2">
-                                            <i class="fas fa-info-circle"></i> Informações
-                                        </a>
+                                    <div class="chart-container">
+                                        <canvas id="graficoResultados"></canvas>
                                     </div>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12">
+                            {atividades_html}
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12 text-center">
+                            <a href="/simulacao" class="btn btn-primary btn-lg me-3">
+                                <i class="fas fa-plus"></i> Nova Simulação
+                            </a>
+                            <a href="/dashboard" class="btn btn-secondary btn-lg">
+                                <i class="fas fa-chart-line"></i> Ver Dashboard
+                            </a>
+                            <button onclick="window.print()" class="btn btn-info btn-lg ms-3">
+                                <i class="fas fa-print"></i> Imprimir Relatório
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -2775,572 +1886,413 @@ def dashboard():
     
     <script>
     document.addEventListener('DOMContentLoaded', function() {{
-        // Contar simulações por nível
-        const niveis = {json.dumps([s['nivel_escolar'] for s in simulacoes])};
-        const contagem = {{}};
-        niveis.forEach(nivel => {{
-            contagem[nivel] = (contagem[nivel] || 0) + 1;
+        // Gráfico de pizza
+        const ctx = document.getElementById('graficoResultados').getContext('2d');
+        new Chart(ctx, {{
+            type: 'pie',
+            data: {{
+                labels: ['Investimento', 'Receita Mensal', 'Custo Mensal', 'Lucro Mensal'],
+                datasets: [{{
+                    data: [
+                        {resultados.get('investimento_inicial', 0)},
+                        {resultados.get('receita_mensal_atividades', 0)},
+                        {resultados.get('custo_mensal_total', 0)},
+                        {resultados.get('lucro_mensal', 0)}
+                    ],
+                    backgroundColor: [
+                        '#FF6B8B',
+                        '#4ECDC4',
+                        '#45B7D1',
+                        '#FF9F1C'
+                    ]
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{
+                        position: 'bottom'
+                    }}
+                }}
+            }}
         }});
+    }});
+    </script>
+    '''
+    
+    return get_base_html(f"Resultados: {nome_simulacao}", content)
+
+@app.route('/dashboard')
+def dashboard():
+    """Dashboard com histórico de simulações"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
         
-        if (Object.keys(contagem).length > 0) {{
-            const ctx = document.getElementById('chartNiveis').getContext('2d');
+        cursor.execute('''
+        SELECT id, nome, data_criacao, total_participantes, investimento_total,
+               receita_mensal_total, lucro_mensal_total, margem_lucro,
+               roi_percentual, payback_meses
+        FROM simulacoes 
+        ORDER BY data_criacao DESC 
+        LIMIT 20
+        ''')
+        
+        simulacoes = cursor.fetchall()
+        
+        # Estatísticas
+        cursor.execute('''
+        SELECT COUNT(*) as total, 
+               AVG(margem_lucro) as avg_margem,
+               AVG(roi_percentual) as avg_roi,
+               SUM(investimento_total) as total_investido,
+               SUM(receita_mensal_total) as total_receita
+        FROM simulacoes
+        ''')
+        
+        stats = cursor.fetchone()
+        conn.close()
+        
+        # HTML para tabela
+        tabela_html = ""
+        if simulacoes:
+            tabela_html = '''
+            <div class="card mb-4">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0"><i class="fas fa-history"></i> Histórico de Simulações</h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0 table-fixed">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th class="col-nome">Nome</th>
+                                    <th class="col-data">Data</th>
+                                    <th class="col-participantes text-center">Part.</th>
+                                    <th class="col-investimento text-end">Investimento</th>
+                                    <th class="col-receita text-end">Receita/Mês</th>
+                                    <th class="col-lucro text-end">Lucro/Mês</th>
+                                    <th class="col-margem text-center">Margem</th>
+                                    <th class="col-roi text-center">ROI</th>
+                                    <th class="col-payback text-center">Payback</th>
+                                    <th class="col-acoes text-center">Ações</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            '''
+            
+            for sim in simulacoes:
+                tabela_html += f'''
+                                <tr>
+                                    <td class="col-nome">
+                                        <span class="text-truncate-cell" title="{sim['nome']}">
+                                            {sim['nome']}
+                                        </span>
+                                    </td>
+                                    <td class="col-data">{sim['data_criacao'][:10]}</td>
+                                    <td class="col-participantes text-center">{sim['total_participantes']}</td>
+                                    <td class="col-investimento text-end">R$ {sim['investimento_total']:,.0f}</td>
+                                    <td class="col-receita text-end text-success">R$ {sim['receita_mensal_total']:,.0f}</td>
+                                    <td class="col-lucro text-end { 'text-success' if sim['lucro_mensal_total'] > 0 else 'text-danger' }">
+                                        R$ {sim['lucro_mensal_total']:,.0f}
+                                    </td>
+                                    <td class="col-margem text-center">
+                                        <span class="badge badge-fixed { 'bg-success' if sim['margem_lucro'] >= 25 else 'bg-warning' if sim['margem_lucro'] >= 15 else 'bg-danger' }">
+                                            {sim['margem_lucro']:.1f}%
+                                        </span>
+                                    </td>
+                                    <td class="col-roi text-center">
+                                        <span class="badge badge-fixed { 'bg-success' if sim['roi_percentual'] >= 100 else 'bg-warning' if sim['roi_percentual'] >= 50 else 'bg-danger' }">
+                                            {sim['roi_percentual']:.1f}%
+                                        </span>
+                                    </td>
+                                    <td class="col-payback text-center">
+                                        <span class="badge badge-fixed { 'bg-success' if sim['payback_meses'] <= 24 else 'bg-warning' if sim['payback_meses'] <= 36 else 'bg-danger' }">
+                                            {sim['payback_meses']:.1f} m
+                                        </span>
+                                    </td>
+                                    <td class="col-acoes text-center">
+                                        <div class="btn-group btn-group-sm" role="group">
+                                            <a href="/simulacao/{sim['id']}" class="btn btn-warning" title="Editar">
+                                                <i class="fas fa-edit"></i>
+                                            </a>
+                                            <a href="/resultado_com_ia" class="btn btn-info" title="Ver Resultados" onclick="sessionStorage.setItem('simulacao_id', {sim['id']})">
+                                                <i class="fas fa-eye"></i>
+                                            </a>
+                                            <button class="btn btn-danger" title="Excluir" onclick="excluirSimulacao({sim['id']})">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                '''
+            
+            tabela_html += '''
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            '''
+        else:
+            tabela_html = '''
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i> Nenhuma simulação encontrada. 
+                <a href="/simulacao" class="alert-link">Crie sua primeira simulação</a>.
+            </div>
+            '''
+        
+        content = f'''
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="card shadow mb-4">
+                    <div class="card-header bg-primary text-white">
+                        <h3 class="mb-0"><i class="fas fa-chart-line"></i> Dashboard - Histórico de Simulações</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-4">
+                            <div class="col-md-3">
+                                <div class="card bg-success text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-calculator"></i></h2>
+                                        <h4>{stats['total']}</h4>
+                                        <p class="mb-0">Simulações</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card bg-info text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-percentage"></i></h2>
+                                        <h4>{stats['avg_margem']:.1f}%</h4>
+                                        <p class="mb-0">Margem Média</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card bg-warning text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-chart-line"></i></h2>
+                                        <h4>{stats['avg_roi']:.1f}%</h4>
+                                        <p class="mb-0">ROI Médio</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card bg-danger text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-money-bill-wave"></i></h2>
+                                        <h4>R$ {stats['total_investido']:,.0f}</h4>
+                                        <p class="mb-0">Total Investido</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        {tabela_html}
+                        
+                        <div class="row mt-4">
+                            <div class="col-12">
+                                <div class="card">
+                                    <div class="card-header bg-secondary text-white">
+                                        <h5 class="mb-0"><i class="fas fa-chart-bar"></i> Análise Comparativa</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="chart-container">
+                                            <canvas id="dashboardChart"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {{
+            // Gráfico do dashboard
+            const ctx = document.getElementById('dashboardChart').getContext('2d');
             new Chart(ctx, {{
-                type: 'doughnut',
+                type: 'bar',
                 data: {{
-                    labels: Object.keys(contagem).map(n => n.replace('_', ' ').toUpperCase()),
+                    labels: ['Margem Média', 'ROI Médio', 'Payback Médio'],
                     datasets: [{{
-                        data: Object.values(contagem),
-                        backgroundColor: [
-                            'rgba(255, 107, 139, 0.7)',   // Infantil
-                            'rgba(78, 205, 196, 0.7)',    // Fundamental I
-                            'rgba(69, 183, 209, 0.7)',    // Fundamental II
-                            'rgba(255, 193, 7, 0.7)'      // Médio
-                        ],
-                        borderWidth: 1
+                        label: 'Seu Desempenho',
+                        data: [{stats['avg_margem']}, {stats['avg_roi']}, 0],
+                        backgroundColor: '#4361ee'
+                    }}, {{
+                        label: 'Benchmarks',
+                        data: [30, 100, 24],
+                        backgroundColor: '#FF9F1C'
                     }}]
                 }},
                 options: {{
                     responsive: true,
-                    plugins: {{
-                        legend: {{ position: 'bottom' }}
+                    maintainAspectRatio: false,
+                    scales: {{
+                        y: {{
+                            beginAtZero: true
+                        }}
                     }}
                 }}
             }});
-        }}
-    }});
-    </script>
-    '''
-    return get_base_html("Dashboard - Business Plan", content)
-
-@app.route('/simulacao/<int:id>')
-def ver_simulacao(id):
-    simulacao_db = buscar_simulacao_por_id(id)
-    if simulacao_db:
-        try:
-            dados_json = json.loads(simulacao_db['dados'])
-        except:
-            dados_json = {'entrada': {}, 'resultados': {}, 'custos_detalhados': {}}
-        
-        # Salvar na sessão para a rota /resultado usar
-        session['ultima_simulacao'] = dados_json
-        return redirect('/resultado')
-    return index()
-
-@app.route('/simulacao/exportar')
-def exportar_simulacao():
-    if 'ultima_simulacao' not in session:
-        return redirect('/')
-    
-    dados = session['ultima_simulacao']
-    
-    # Criar um formato simplificado para exportação
-    export_data = {
-        'timestamp': datetime.now().isoformat(),
-        'dados_entrada': dados['dados_entrada'],
-        'resultados': dados['resultados'],
-        'custos_detalhados': dados.get('custos_detalhados', {})
-    }
-    
-    return jsonify(export_data)
-
-@app.route('/info')
-def info():
-    simulacoes_count = len(buscar_simulacoes())
-    
-    # Contar por nível escolar
-    simulacoes = buscar_simulacoes()
-    contagem_niveis = {}
-    for s in simulacoes:
-        nivel = s['nivel_escolar']
-        contagem_niveis[nivel] = contagem_niveis.get(nivel, 0) + 1
-    
-    niveis_html = ""
-    for nivel, count in contagem_niveis.items():
-        niveis_html += f'''
-        <div class="col-md-3">
-            <div class="card">
-                <div class="card-body text-center">
-                    <h3>{count}</h3>
-                    <p>{nivel.replace('_', ' ').title()}</p>
-                </div>
-            </div>
-        </div>
+            
+            // Função para excluir simulação
+            window.excluirSimulacao = function(id) {{
+                if (confirm('Tem certeza que deseja excluir esta simulação?')) {{
+                    fetch('/api/excluir_simulacao/' + id, {{
+                        method: 'DELETE'
+                    }})
+                    .then(response => response.json())
+                    .then(data => {{
+                        if (data.success) {{
+                            location.reload();
+                        }} else {{
+                            alert('Erro ao excluir simulação: ' + (data.error || 'Erro desconhecido'));
+                        }}
+                    }})
+                    .catch(error => {{
+                        alert('Erro: ' + error.message);
+                    }});
+                }}
+            }};
+        }});
+        </script>
         '''
-    
-    content = f'''
-    <div class="row">
-        <div class="col-lg-10 mx-auto">
-            <div class="card">
-                <div class="card-header bg-primary text-white">
-                    <h3 class="mb-0"><i class="fas fa-info-circle"></i> Informações do Sistema Avançado</h3>
-                </div>
-                <div class="card-body">
-                    <h4>Sistema de Business Plan Escolar - Versão Avançada</h4>
-                    <p><strong>Versão:</strong> 2.0.0 (com custos específicos)</p>
-                    <p><strong>Status:</strong> Online e operacional</p>
-                    <p><strong>Última atualização:</strong> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
-                    
-                    <h5 class="mt-4">Estatísticas do Sistema:</h5>
-                    <div class="row mb-4">
-                        <div class="col-md-3">
-                            <div class="card bg-info text-white">
-                                <div class="card-body text-center">
-                                    <h3>{simulacoes_count}</h3>
-                                    <p>Total de Simulações</p>
-                                </div>
-                            </div>
-                        </div>
-                        {niveis_html}
-                    </div>
-                    
-                    <h5 class="mt-4">Funcionalidades Avançadas:</h5>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <ul>
-                                <li><strong>Custos por nível escolar</strong> - Infantil, Fundamental I/II, Médio</li>
-                                <li><strong>Seleção de atividades específicas</strong> por nível</li>
-                                <li><strong>Cálculo automático de professores</strong> necessários</li>
-                                <li><strong>Ratio professor/aluno</strong> configurável por nível</li>
-                            </ul>
-                        </div>
-                        <div class="col-md-6">
-                            <ul>
-                                <li><strong>Custos detalhados por categoria</strong> - 4 categorias principais</li>
-                                <li><strong>Seleção de itens de custo</strong> personalizável</li>
-                                <li><strong>Materiais por aluno</strong> ou fixos</li>
-                                <li><strong>Gráficos interativos</strong> de distribuição</li>
-                            </ul>
-                        </div>
-                    </div>
-                    
-                    <h5 class="mt-4">Categorias de Custos Implementadas:</h5>
-                    <div class="row">
-                        <div class="col-md-3">
-                            <div class="alert alert-primary">
-                                <strong>Infraestrutura</strong><br>
-                                {len(CATEGORIAS_CUSTOS['infraestrutura']['itens'])} itens
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="alert alert-success">
-                                <strong>Material</strong><br>
-                                {len(CATEGORIAS_CUSTOS['material']['itens'])} itens
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="alert alert-warning">
-                                <strong>Marketing</strong><br>
-                                {len(CATEGORIAS_CUSTOS['marketing']['itens'])} itens
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="alert alert-info">
-                                <strong>Recursos Humanos</strong><br>
-                                {len(CATEGORIAS_CUSTOS['recursos_humanos']['itens'])} itens
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="text-center mt-4">
-                        <a href="/" class="btn btn-primary">
-                            <i class="fas fa-home"></i> Voltar ao Sistema
-                        </a>
-                        <a href="/dashboard" class="btn btn-success ms-2">
-                            <i class="fas fa-chart-bar"></i> Ver Dashboard
-                        </a>
-                        <a href="/simulacao" class="btn btn-warning ms-2">
-                            <i class="fas fa-calculator"></i> Nova Simulação
-                        </a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    '''
-    return get_base_html("Informações do Sistema", content)
+        
+        return get_base_html("Dashboard", content)
+        
+    except Exception as e:
+        print(f"Erro no dashboard: {e}")
+        return redirect('/')
 
-# Rota de saúde
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'healthy', 
-        'timestamp': datetime.now().isoformat(),
-        'service': 'Business Plan Escolar - Versão Avançada',
-        'version': '2.0.0',
-        'database': 'active',
-        'simulations_count': len(buscar_simulacoes()),
-        'features': {
-            'cost_categories': len(CATEGORIAS_CUSTOS),
-            'school_levels': len(CUSTOS_POR_NIVEL),
-            'total_cost_items': sum(len(cat['itens']) for cat in CATEGORIAS_CUSTOS.values())
-        }
-    })
-
-# Tratamento de erros
-@app.errorhandler(404)
-def page_not_found(e):
+@app.route('/analise_ia')
+def analise_ia():
+    """Página de análise de IA avançada"""
     content = '''
-    <div class="container text-center py-5">
-        <div class="row">
-            <div class="col-lg-6 mx-auto">
-                <div class="card shadow">
-                    <div class="card-body p-5">
-                        <h1 class="display-1 text-muted">404</h1>
-                        <h2 class="mb-4">Página não encontrada</h2>
-                        <p class="lead mb-4">
-                            A página que você está procurando não existe ou foi movida.
-                        </p>
-                        <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
-                            <a href="/" class="btn btn-primary btn-lg px-4 gap-3">
-                                <i class="fas fa-home"></i> Voltar ao Início
-                            </a>
-                            <a href="/simulacao" class="btn btn-outline-primary btn-lg px-4">
-                                <i class="fas fa-calculator"></i> Nova Simulação
-                            </a>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    '''
-    return get_base_html("Página não encontrada - 404", content), 404
-
-@app.errorhandler(500)
-def internal_server_error(e):
-    content = '''
-    <div class="container text-center py-5">
-        <div class="row">
-            <div class="col-lg-6 mx-auto">
-                <div class="card shadow">
-                    <div class="card-body p-5">
-                        <h1 class="display-1 text-danger">500</h1>
-                        <h2 class="mb-4">Erro interno do servidor</h2>
-                        <p class="lead mb-4">
-                            Ocorreu um erro inesperado. Nossa equipe já foi notificada.
-                        </p>
-                        <p class="text-muted mb-4">
-                            Tente novamente em alguns instantes ou entre em contato com o suporte.
-                        </p>
-                        <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
-                            <a href="/" class="btn btn-primary btn-lg px-4 gap-3">
-                                <i class="fas fa-redo"></i> Tentar Novamente
-                            </a>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    '''
-    return get_base_html("Erro Interno - 500", content), 500
-
-@app.route('/editar-simulacao/<int:simulacao_id>')
-def editar_simulacao(simulacao_id):
-    """Página para editar uma simulação existente"""
-    # Buscar a simulação no banco
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT * FROM simulacoes WHERE id = ?', (simulacao_id,))
-    sim = cursor.fetchone()
-    conn.close()
-    
-    if not sim:
-        return redirect('/dashboard')
-    
-    # Carregar dados
-    dados_entrada = json.loads(sim['dados']) if sim['dados'] else {}
-    
-    content = f'''
     <div class="row">
         <div class="col-lg-10 mx-auto">
             <div class="card shadow">
-                <div class="card-header bg-warning text-dark">
-                    <h3 class="mb-0"><i class="fas fa-edit"></i> Editar Simulação #{simulacao_id}</h3>
-                    <p class="mb-0"><small>Data de criação: {sim['data_criacao']}</small></p>
+                <div class="card-header bg-dark text-white">
+                    <h3 class="mb-0"><i class="fas fa-brain"></i> Análise Avançada com IA</h3>
                 </div>
                 <div class="card-body">
-                    <form id="formEdicao">
-                        <div class="row">
-                            <div class="col-md-6">
-                                <h5 class="border-bottom pb-2 mb-3">📊 Dados Básicos</h5>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Nível Escolar:</strong></label>
-                                    <input type="text" class="form-control" value="{sim['nivel_escolar']}" readonly>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-header bg-info text-white">
+                                    <h5 class="mb-0"><i class="fas fa-robot"></i> Funcionalidades da IA</h5>
                                 </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Alunos Atuais:</strong></label>
-                                    <input type="number" class="form-control edit-field" id="alunos_atuais" 
-                                           value="{dados_entrada.get('alunos_atuais', sim['alunos_atuais'])}" min="1">
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Aumento Esperado (%):</strong></label>
-                                    <input type="number" class="form-control edit-field" id="aumento_esperado" 
-                                           value="{dados_entrada.get('aumento_esperado', sim['aumento_esperado'])}" min="10" max="50">
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Quantidade Alunos (Atividade):</strong></label>
-                                    <input type="number" class="form-control edit-field" id="quantidade_alunos" 
-                                           value="{dados_entrada.get('quantidade_alunos_atividade', 0)}" min="0">
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Quantidade Não-Alunos:</strong></label>
-                                    <input type="number" class="form-control edit-field" id="quantidade_nao_alunos" 
-                                           value="{dados_entrada.get('quantidade_nao_alunos_atividade', 0)}" min="0">
-                                </div>
-                            </div>
-                            
-                            <div class="col-md-6">
-                                <h5 class="border-bottom pb-2 mb-3">💰 Receitas e Custos</h5>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Receita Alunos (R$/mês):</strong></label>
-                                    <input type="number" class="form-control edit-field" id="receita_alunos" 
-                                           value="{dados_entrada.get('receita_alunos_atividade', 150)}" min="0" step="10">
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Receita Não-Alunos (R$/mês):</strong></label>
-                                    <input type="number" class="form-control edit-field" id="receita_nao_alunos" 
-                                           value="{dados_entrada.get('receita_nao_alunos_atividade', 200)}" min="0" step="10">
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Investimento Total (R$):</strong></label>
-                                    <input type="number" class="form-control edit-field" id="investimento" 
-                                           value="{sim['investimento_total']}" min="0" step="100">
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label"><strong>Custos Mensais (R$):</strong></label>
-                                    <input type="number" class="form-control edit-field" id="custos_mensais" 
-                                           value="{dados_entrada.get('custo_mensal_operacional', 0)}" min="0" step="100">
-                                </div>
-                                
-                                <div class="alert alert-info mt-4">
-                                    <h6 class="mb-2"><i class="fas fa-chart-line"></i> Resultados Atuais:</h6>
-                                    <p class="mb-1"><small><strong>ROI:</strong> {sim['roi']:.1f}%</small></p>
-                                    <p class="mb-1"><small><strong>Payback:</strong> {sim['payback']:.1f} meses</small></p>
-                                    <p class="mb-0"><small><strong>Retorno Mensal:</strong> R$ {sim['retorno_mensal']:,.2f}</small></p>
+                                <div class="card-body">
+                                    <ul class="list-group list-group-flush">
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Análise de Rentabilidade:</strong> Avaliação detalhada dos indicadores financeiros
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Detecção de Riscos:</strong> Identificação de pontos críticos no plano
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Otimização de Custos:</strong> Sugestões para redução de despesas
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Benchmarking:</strong> Comparação com padrões do setor
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Plano de Ação Personalizado:</strong> Passos concretos para implementação
+                                        </li>
+                                    </ul>
                                 </div>
                             </div>
                         </div>
                         
-                        <hr class="my-4">
-                        
-                        <div class="row">
-                            <div class="col-12">
-                                <button type="button" class="btn btn-primary btn-lg" onclick="recalcularSimulacaoEditar()">
-                                    <i class="fas fa-sync"></i> Recalcular com Novos Valores
-                                </button>
-                                <a href="/dashboard" class="btn btn-secondary btn-lg ms-2">
-                                    <i class="fas fa-arrow-left"></i> Voltar ao Dashboard
-                                </a>
-                            </div>
-                        </div>
-                        
-                        <div id="resultado-edicao" class="mt-4"></div>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-    function recalcularSimulacaoEditar() {{
-        const dados = {{
-            alunos_atuais: parseInt(document.getElementById('alunos_atuais').value),
-            aumento_esperado: parseInt(document.getElementById('aumento_esperado').value),
-            receita_alunos_atividade: parseFloat(document.getElementById('receita_alunos').value),
-            receita_nao_alunos_atividade: parseFloat(document.getElementById('receita_nao_alunos').value),
-            quantidade_alunos_atividade: parseInt(document.getElementById('quantidade_alunos').value),
-            quantidade_nao_alunos_atividade: parseInt(document.getElementById('quantidade_nao_alunos').value),
-            investimento_total_editado: parseFloat(document.getElementById('investimento').value),
-            custos_mensais_editado: parseFloat(document.getElementById('custos_mensais').value)
-        }};
-        
-        fetch('/api/recalcular-edicao/{simulacao_id}', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify(dados)
-        }})
-        .then(response => response.json())
-        .then(data => {{
-            if (data.sucesso) {{
-                const resultDiv = document.getElementById('resultado-edicao');
-                const novoPayback = data.resultados.payback_meses >= 999999 ? '∞' : data.resultados.payback_meses.toFixed(1);
-                
-                resultDiv.innerHTML = `
-                    <div class="alert alert-success">
-                        <h6><i class="fas fa-check-circle"></i> ✅ Simulação recalculada e salva com sucesso!</h6>
-                        <div class="row mt-3">
-                            <div class="col-md-3">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small>Receita Mensal</small>
-                                    <h5 class="text-success">R$ ${{data.resultados.receita_mensal.toLocaleString('pt-BR', {{minimumFractionDigits: 0}})}}</h5>
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-header bg-success text-white">
+                                    <h5 class="mb-0"><i class="fas fa-chart-line"></i> Como Funciona</h5>
                                 </div>
-                            </div>
-                            <div class="col-md-3">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small>Lucro Mensal</small>
-                                    <h5 class="text-success">R$ ${{data.resultados.lucro_mensal.toLocaleString('pt-BR', {{minimumFractionDigits: 0}})}}</h5>
-                                </div>
-                            </div>
-                            <div class="col-md-3">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small>Payback</small>
-                                    <h5 class="text-warning">${{novoPayback}} meses</h5>
-                                </div>
-                            </div>
-                            <div class="col-md-3">
-                                <div class="text-center p-2 border rounded bg-light">
-                                    <small>ROI Anual</small>
-                                    <h5 class="text-success">${{data.resultados.roi_percentual.toFixed(1)}}%</h5>
+                                <div class="card-body">
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-1 text-primary"></i> Coleta de Dados</h6>
+                                        <p class="small">Você insere informações sobre atividades, custos e receitas.</p>
+                                    </div>
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-2 text-primary"></i> Processamento</h6>
+                                        <p class="small">O sistema calcula indicadores financeiros automaticamente.</p>
+                                    </div>
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-3 text-primary"></i> Análise IA</h6>
+                                        <p class="small">Inteligência Artificial analisa os dados e gera recomendações.</p>
+                                    </div>
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-4 text-primary"></i> Relatório</h6>
+                                        <p class="small">Você recebe um relatório detalhado com plano de ação.</p>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                `;
-                
-                // Scroll para resultado
-                resultDiv.scrollIntoView({{ behavior: 'smooth' }});
-            }} else {{
-                alert('Erro ao recalcular: ' + (data.error || 'Desconhecido'));
-            }}
-        }})
-        .catch(error => alert('Erro: ' + error.message));
-    }}
-    </script>
+                    
+                    <div class="row">
+                        <div class="col-12">
+                            <div class="card">
+                                <div class="card-header bg-warning text-white">
+                                    <h5 class="mb-0"><i class="fas fa-lightbulb"></i> Benefícios da Análise com IA</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="row">
+                                        <div class="col-md-4">
+                                            <div class="text-center p-3">
+                                                <i class="fas fa-clock fa-3x text-primary mb-3"></i>
+                                                <h6>Economia de Tempo</h6>
+                                                <p class="small">Análise em segundos que levaria horas manualmente</p>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="text-center p-3">
+                                                <i class="fas fa-shield-alt fa-3x text-success mb-3"></i>
+                                                <h6>Redução de Riscos</h6>
+                                                <p class="small">Identificação antecipada de problemas</p>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="text-center p-3">
+                                                <i class="fas fa-chart-line fa-3x text-danger mb-3"></i>
+                                                <h6>Melhores Resultados</h6>
+                                                <p class="small">Otimização da rentabilidade do projeto</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12 text-center">
+                            <a href="/simulacao" class="btn btn-primary btn-lg me-3">
+                                <i class="fas fa-rocket"></i> Começar Análise
+                            </a>
+                            <a href="/dashboard" class="btn btn-secondary btn-lg">
+                                <i class="fas fa-history"></i> Ver Histórico
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
     '''
-    return get_base_html(f"Editar Simulação #{simulacao_id}", content)
-
-@app.route('/api/recalcular-edicao/<int:simulacao_id>', methods=['POST'])
-def recalcular_edicao(simulacao_id):
-    """Recalcula e salva uma simulação editada"""
-    try:
-        dados_editados = request.json
-        
-        # Buscar simulação no banco
-        conn = sqlite3.connect(DATABASE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM simulacoes WHERE id = ?', (simulacao_id,))
-        sim = cursor.fetchone()
-        conn.close()
-        
-        if not sim:
-            return jsonify({'sucesso': False, 'error': 'Simulação não encontrada'}), 404
-        
-        # Carregar dados anteriores
-        dados_originais = json.loads(sim['dados']) if sim['dados'] else {}
-        
-        # Mesclar com dados editados
-        dados_atualizados = {**dados_originais, **{k: v for k, v in dados_editados.items() if not k.endswith('_editado')}}
-        
-        # Adicionar nível escolar (não muda)
-        dados_atualizados['nivel_escolar'] = sim['nivel_escolar']
-        
-        # Recalcular
-        custos_detalhados = calcular_custos_detalhados(dados_atualizados)
-        
-        # Aplicar ajustes de investimento e custos mensais se foram editados
-        if 'investimento_total_editado' in dados_editados:
-            custos_detalhados['resumo']['investimento_total'] = dados_editados['investimento_total_editado']
-        
-        if 'custos_mensais_editado' in dados_editados:
-            custos_detalhados['resumo']['custo_mensal_operacional'] = dados_editados['custos_mensais_editado']
-        
-        resultados = calcular_projecao(dados_atualizados, custos_detalhados)
-        
-        # Converter Infinity
-        if math.isinf(resultados['payback_meses']):
-            resultados['payback_meses'] = 999999
-        
-        # Atualizar no banco de dados
-        conn = sqlite3.connect(DATABASE)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        UPDATE simulacoes SET 
-            receita_mensal_atual = ?,
-            investimento_total = ?,
-            retorno_mensal = ?,
-            payback = ?,
-            roi = ?,
-            dados = ?
-        WHERE id = ?
-        ''', (
-            resultados['receita_mensal'],
-            resultados['investimento_total'],
-            resultados['retorno_mensal'],
-            resultados['payback_meses'],
-            resultados['roi_percentual'],
-            json.dumps(dados_atualizados),
-            simulacao_id
-        ))
-        
-        conn.commit()
-        conn.close()
-        
-        return jsonify({
-            'sucesso': True,
-            'resultados': resultados
-        })
-        
-    except Exception as e:
-        return jsonify({'sucesso': False, 'error': str(e)}), 500
+    
+    return get_base_html("Análise com IA", content)
 
 if __name__ == '__main__':
-    # Inicializar banco de dados
-    if init_db():
-        print("=" * 60)
-        print("🚀 SISTEMA DE BUSINESS PLAN ESCOLAR - VERSÃO AVANÇADA")
-        print("=" * 60)
-        print("📊 Sistema com custos específicos por nível escolar")
-        print("=" * 60)
-        
-        # Configurações
-        port = int(os.environ.get('PORT', 5000))
-        debug = os.environ.get('FLASK_ENV') != 'production'
-        
-        if debug:
-            print("🔧 Modo: Desenvolvimento")
-            print("🌐 Acesse: http://localhost:{}".format(port))
-        else:
-            print("🚀 Modo: Produção")
-            print("✅ Sistema pronto para acesso remoto")
-        
-        # Informações
-        print("\n📊 Funcionalidades implementadas:")
-        print("   ✅ Custos por nível escolar (4 níveis)")
-        print("   ✅ {0} categorias de custos detalhadas".format(len(CATEGORIAS_CUSTOS)))
-        print("   ✅ {0} itens de custo configuráveis".format(sum(len(cat['itens']) for cat in CATEGORIAS_CUSTOS.values())))
-        print("   ✅ Cálculo automático de professores necessários")
-        print("   ✅ Seleção de atividades específicas por nível")
-        
-        print("\n💡 Dicas de uso:")
-        print("   1. Selecione o nível escolar para custos específicos")
-        print("   2. Escolha atividades adequadas ao nível")
-        print("   3. Selecione itens de custo conforme necessidade")
-        print("   4. Analise o ROI e payback por nível")
-        
-        print("=" * 60)
-        print("📢 Sistema iniciado com sucesso!")
-        print("=" * 60)
-        
-        # Executar aplicação
-        app.run(
-            debug=debug, 
-            port=port, 
-            host='0.0.0.0',
-            threaded=True
-        )
-    else:
-        print("❌ Não foi possível inicializar o sistema.")
+    app.run(debug=True, port=5000)
